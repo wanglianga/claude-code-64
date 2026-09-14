@@ -1,0 +1,214 @@
+import { useState } from 'react';
+import { CAMPUSES, DEPARTMENTS, ESCORTS, RATING_TAGS } from '../data';
+import { useStore } from '../store';
+import { fmtDateTime, reportReadyText } from '../plan';
+import { ChatPanel, FeeTable, MaterialChecklist, ReportReadyHint, StageStepper, Stars, StatusBadge } from '../ui';
+
+export default function FamilyOrder({ orderId, onBack }: { orderId: string; onBack: () => void }) {
+  const order = useStore((s) => s.orders.find((o) => o.id === orderId))!;
+  const decideAuthorization = useStore((s) => s.decideAuthorization);
+  const acknowledgeHandover = useStore((s) => s.acknowledgeHandover);
+  const rateOrder = useStore((s) => s.rateOrder);
+
+  const [rating, setRating] = useState(order.archive?.rating ?? 5);
+  const [tags, setTags] = useState<string[]>(order.archive?.ratingTags ?? []);
+  const [comment, setComment] = useState(order.archive?.ratingComment ?? '');
+
+  const dept = DEPARTMENTS.find((d) => d.id === order.form.departmentId)!;
+  const campus = CAMPUSES.find((c) => c.id === dept.campusId)!;
+  const escort = ESCORTS.find((e) => e.id === order.escortId);
+  const contact = order.form.contactName || '家属';
+
+  const toggleTag = (t: string) => setTags((x) => (x.includes(t) ? x.filter((z) => z !== t) : [...x, t]));
+
+  return (
+    <div>
+      <div className="top-back">
+        <button className="btn btn-sm" onClick={onBack}>← 返回列表</button>
+        <h1>{dept.name}陪诊单 <span className="code mono small">{order.code}</span></h1>
+        <StatusBadge status={order.status} />
+      </div>
+
+      {/* 分时到院建议 */}
+      <div className="time-hero">
+        <div><div className="lbl">建议到院</div><div className="big">{order.advice.arriveTime}</div></div>
+        <div><div className="lbl">挂号时间</div><div style={{ fontSize: 22, fontWeight: 700 }}>{order.status === 'draft' ? order.advice.registerTime : order.registrationTime}</div></div>
+        <div><div className="lbl">出诊时段</div><div style={{ fontSize: 22, fontWeight: 700 }}>{order.advice.slotStart}</div></div>
+        <span className={`badge ${order.advice.crowdedness === '高' ? 'red' : order.advice.crowdedness === '中' ? 'orange' : 'green'}`}>拥堵：{order.advice.crowdedness}</span>
+        <span className="badge blue">{campus.name}</span>
+      </div>
+      <div className="card">
+        <h2>🕑 分时依据（系统为什么建议这个时间到院）</h2>
+        {order.advice.reason.map((r, i) => <div key={i} className="callout teal">{r}</div>)}
+      </div>
+
+      <div className="grid grid-2" style={{ alignItems: 'start' }}>
+        <div className="card">
+          <h2>🎒 材料清单</h2>
+          <MaterialChecklist items={order.materials} orderId={order.id} editable={order.status !== 'completed'} />
+        </div>
+        <div className="card">
+          <h2>👤 就诊信息</h2>
+          <dl className="kv">
+            <dt>就诊人</dt><dd>{order.form.patientName}，{order.form.patientAge} 岁，{order.form.patientGender}</dd>
+            <dt>行动能力</dt><dd>{order.form.mobility === 'wheelchair' ? '需轮椅代步' : order.form.mobility === 'bedridden' ? '卧床/平车' : order.form.mobility === 'cane' ? '拄拐/搀扶' : order.form.mobility === 'slow' ? '行走缓慢' : '可自主行走'}{order.form.needWheelchair ? '（已预约轮椅）' : ''}</dd>
+            <dt>空腹</dt><dd>{order.form.fasting ? '是，已要求禁食 8 小时' : '否'}</dd>
+            <dt>既往病历</dt><dd>{order.form.medicalHistory || '未填写'}</dd>
+            <dt>检查单</dt><dd>{order.form.examSheetText || '结构化勾选检查项'}</dd>
+            <dt>陪诊诉求</dt><dd>{order.form.demands || '—'}</dd>
+            <dt>陪诊员</dt><dd>{escort ? `${escort.name}（${escort.title}，${escort.shift}），电话 ${escort.phone}` : <span className="muted">派单中…</span>}</dd>
+          </dl>
+        </div>
+      </div>
+
+      {/* 执行信息（接单后可见） */}
+      {escort && (
+        <div className="card">
+          <h2>🧭 现场执行信息（陪诊员已确认）</h2>
+          <div className="grid grid-3">
+            <div><span className="muted small">挂号/签到</span><br /><b>{order.registrationTime || order.advice.registerTime}</b>　<span className="small muted">{dept.building} 1 层</span></div>
+            <div><span className="muted small">楼栋 · 诊室</span><br /><b>{order.building} · {order.room}</b></div>
+            <div><span className="muted small">缴费窗口</span><br /><b className="small">{order.payWindow}</b></div>
+            <div><span className="muted small">抽血/检验点</span><br /><b className="small">{order.bloodLocation}</b></div>
+            <div><span className="muted small">影像检查点</span><br /><b className="small">{order.imageLocation}</b></div>
+            <div><span className="muted small">取药点</span><br /><b className="small">{order.pharmacyPoint}</b></div>
+          </div>
+          <div className="hr" />
+          <h3>院内复杂路线（陪诊员按此推送）</h3>
+          {order.routeSteps.map((r, i) => (
+            <div key={i} className="route-step"><span className="idx">{i + 1}</span><span className="txt">{r}</span></div>
+          ))}
+        </div>
+      )}
+
+      {/* 实时行程 */}
+      {(order.status === 'ongoing' || order.status === 'completed') && (
+        <div className="card">
+          <h2>📍 患者到院实时行程</h2>
+          <StageStepper order={order} />
+          <div className="hr" />
+          <div className="grid grid-2">
+            <ReportReadyHint order={order} />
+            <div className="small muted">
+              {order.stages.filter((s) => s.status === 'done').length} 个环节已完成；陪诊员每推进一步，此处与下方对话同步更新。
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 跨院区 */}
+      {order.crossCampus && (
+        <div className="card">
+          <h2>🏥 跨院区检查行程</h2>
+          <div className="grid grid-3">
+            <div><span className="muted small">目标院区</span><br /><b>{CAMPUSES.find((c) => c.id === order.crossCampus!.targetCampusId)?.name}</b></div>
+            <div><span className="muted small">交通方式</span><br /><b>{{ hospitalShuttle: '医院免费班车', taxi: '出租车', ambulance: '救护转运车', walk: '步行陪同' }[order.crossCampus.transport]}</b></div>
+            <div><span className="muted small">状态</span><br /><b>{({ planned: '已规划', enroute: '前往途中', checking: '检查中', returned: '已返院' })[order.crossCampus.status]}</b></div>
+            <div><span className="muted small">发车时间</span><br /><b>{order.crossCampus.departTime}</b></div>
+            <div><span className="muted small">预计返院</span><br /><b className="text-warn" style={{ color: 'var(--warn)' }}>{order.crossCampus.expectedReturnTime}</b></div>
+            <div><span className="muted small">实际返院</span><br /><b>{order.crossCampus.actualReturnTime ? fmtDateTime(order.crossCampus.actualReturnTime) : '—'}</b></div>
+          </div>
+          <div className="callout info" style={{ marginTop: 12 }}>{order.crossCampus.note}</div>
+          <div className="callout ok">✅ 报告互认：{order.crossCampus.reportMutualRecognized ? '跨院区检查报告两院互认，回总院可直接回诊，不重复检查、不重复收费' : '需回院区取报告'}</div>
+        </div>
+      )}
+
+      {/* 换班知悉 */}
+      {order.handover && (
+        <div className="card">
+          <h2>🔄 陪诊员换班交接</h2>
+          <dl className="kv">
+            <dt>交接</dt><dd>{ESCORTS.find((e) => e.id === order.handover!.fromEscortId)?.name} → {ESCORTS.find((e) => e.id === order.handover!.toEscortId)?.name}</dd>
+            <dt>时间</dt><dd>{fmtDateTime(order.handover.time)}</dd>
+            <dt>原因</dt><dd>{order.handover.reason}</dd>
+            <dt>交接事项</dt><dd>{order.handover.checklist}</dd>
+          </dl>
+          {order.handover.acknowledgedByFamily
+            ? <div className="callout ok">✅ 您已知悉并确认，服务不中断</div>
+            : <button className="btn btn-primary" onClick={() => acknowledgeHandover(order.id)}>我已知悉，确认换班安排</button>}
+        </div>
+      )}
+
+      {/* 远程授权 */}
+      {order.authorizations.length > 0 && (
+        <div className="card">
+          <h2>🔏 家属远程授权</h2>
+          <div className="sub">陪诊员遇到需要您拍板的处置（费用变化、跨院区、补单、停诊方案）时，在这里请求授权</div>
+          {order.authorizations.map((a) => (
+            <div key={a.id} className={`auth-card ${a.status}`}>
+              <div className="ttl">{a.title}
+                {a.status === 'pending' && <span className="badge red" style={{ marginLeft: 8 }}>待您决定</span>}
+                {a.status === 'approved' && <span className="badge green" style={{ marginLeft: 8 }}>已授权</span>}
+                {a.status === 'rejected' && <span className="badge gray" style={{ marginLeft: 8 }}>已拒绝</span>}
+              </div>
+              <div className="small" style={{ margin: '4px 0' }}>{a.detail}</div>
+              <div className="small">费用变化：<b style={{ color: a.feeDelta > 0 ? 'var(--danger)' : 'var(--ok)' }}>{a.feeDelta > 0 ? '+' : ''}{a.feeDelta} 元</b>　<span className="muted">{fmtDateTime(a.createdAt)}</span></div>
+              {a.status === 'pending' && (
+                <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
+                  <button className="btn btn-primary btn-sm" onClick={() => decideAuthorization(order.id, a.id, true, contact)}>✅ 授权执行</button>
+                  <button className="btn btn-danger btn-sm" onClick={() => decideAuthorization(order.id, a.id, false, contact)}>不同意，换备选方案</button>
+                </div>
+              )}
+              {a.status !== 'pending' && <div className="small muted" style={{ marginTop: 6 }}>{a.responder} 于 {fmtDateTime(a.decidedAt)} {a.status === 'approved' ? '授权' : '拒绝'}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="grid grid-2" style={{ alignItems: 'start' }}>
+        {/* 远程同步对话 */}
+        <div className="card">
+          <h2>💬 远程同步（状态 / 下一步 / 费用）</h2>
+          <div className="sub">陪诊员会把当前阶段、排队叫号、下一步选择与费用变化实时同步到这里，您也可以随时追问</div>
+          <ChatPanel order={order} role="family" author={contact} />
+        </div>
+        {/* 费用 */}
+        <div className="card">
+          <h2>💰 费用变化明细</h2>
+          <FeeTable order={order} />
+          <div className="callout warn" style={{ marginTop: 10 }}>
+            异常处置产生的加收/退费，均需在左侧对话中说明并经您授权后入账；跨院区含交通费 + 跨区陪诊费。
+          </div>
+        </div>
+      </div>
+
+      {/* 服务档案 + 评价 */}
+      {order.status === 'completed' && order.archive && (
+        <div className="card">
+          <h2>📁 本次服务档案</h2>
+          <div className="grid grid-2" style={{ alignItems: 'start' }}>
+            <div>
+              <dl className="kv">
+                <dt>诊断结果</dt><dd>{order.archive.diagnosis}</dd>
+                <dt>用药说明</dt><dd style={{ whiteSpace: 'pre-wrap' }}>{order.archive.medicationGuide}</dd>
+                <dt>复查时间</dt><dd><b style={{ color: 'var(--danger)' }}>{order.archive.revisitDate}</b>（系统将在复诊前 3 天/1 天向家属与陪诊员推送提醒）</dd>
+                <dt>发票</dt><dd>{order.archive.invoiceHandled ? `已开具电子发票 ${order.archive.invoiceNumber ?? ''}` : '待开具'}</dd>
+                <dt>报告出具</dt><dd>{order.archive.reportReadyAt || reportReadyText(order)}</dd>
+                <dt>报告领取</dt><dd>{order.archive.reportPickup}</dd>
+              </dl>
+            </div>
+            <div>
+              <h3>陪诊服务评价</h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '6px 0' }}>
+                <Stars value={rating} onChange={setRating} size={26} />
+                <b>{rating} 星</b>
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                {RATING_TAGS.map((t) => (
+                  <button key={t} type="button" className={`check-pill ${tags.includes(t) ? 'on' : ''}`} onClick={() => toggleTag(t)}>
+                    {tags.includes(t) ? '✓ ' : ''}{t}
+                  </button>
+                ))}
+              </div>
+              <textarea className="input" value={comment} onChange={(e) => setComment(e.target.value)} placeholder="说说本次陪诊的感受，将进入陪诊员服务质量评估" />
+              <button className="btn btn-primary" style={{ marginTop: 10 }} onClick={() => rateOrder(order.id, rating, tags, comment || '家属未填写文字评价')}>提交评价</button>
+              <div className="callout teal" style={{ marginTop: 12 }}>
+                评价将与本次行程的准点率、异常响应时长、费用透明度一起，进入陪诊员服务质量评估（服务台端可见星级、本月单量与好评标签）。
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

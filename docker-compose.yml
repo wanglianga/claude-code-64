@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    image: warm-sun-escort:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-task-escort}-app
+    # 仅发布应用端口到宿主机；本应用为纯前端 SPA，无数据库/缓存依赖
+    # 宿主端口由评估环境变量 CC_PUBLISH_PORT 注入，容器内固定 8080（非 root 端口）
+    ports:
+      - "${CC_PUBLISH_PORT:-3064}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
