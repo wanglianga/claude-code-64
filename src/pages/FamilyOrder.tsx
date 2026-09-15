@@ -111,6 +111,7 @@ export default function FamilyOrder({ orderId, onBack }: { orderId: string; onBa
                   <span className="badge teal">{({ planned: '已规划', volunteerRequested: '已呼叫志愿者', elevatorBooked: '医梯已预约', enroute: '转运途中', arrived: '已到达检查点', cancelled: '已取消' })[t.status]}</span>
                 </div>
                 <div className="small" style={{ margin: '5px 0' }}>
+                  <span className="badge blue" style={{ marginRight: 6 }}>{t.campusId === 'east' ? '东院区' : '总院'}</span>
                   {t.fromLocation} → {t.toLocation} · {modeName}
                   {t.needSupine && <span className="badge orange" style={{ marginLeft: 6 }}>卧位</span>}
                   {!t.canUseToiletIndependently && <span className="badge blue" style={{ marginLeft: 6 }}>如厕需协助</span>}

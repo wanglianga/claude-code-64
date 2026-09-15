@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useStore } from '../store';
-import { CONGESTION_TIP, LOCATIONS, routeCongestedHint, transferFeeTotal } from '../transfer';
+import { buildSegment, CONGESTION_TIP, isRouteConfigured, LOCATIONS, ORIGIN_KEYS, routeCongestedHint, transferFeeTotal } from '../transfer';
+import { DEPARTMENTS } from '../data';
 import type { EscortOrder, TransferMode, TransferSegment, TransferStatus, WheelchairTransfer } from '../types';
 
 const MODE_LABEL: Record<TransferMode, string> = { wheelchair: '轮椅', stretcher: '医用平车（卧位）', walkAssist: '搀扶步行' };
@@ -38,14 +39,25 @@ function RoutePreview({ seg }: { seg: TransferSegment }) {
 
 function TransferForm({ order }: { order: EscortOrder }) {
   const createTransfer = useStore((s) => s.createTransfer);
+  const orderCampus = DEPARTMENTS.find((d) => d.id === order.form.departmentId)?.campusId ?? 'main';
+  const campusName = LOCATIONS[orderCampus === 'east' ? 'eastOutpatient' : 'outpatient1'].campusName;
+  const defaultFrom = orderCampus === 'east' ? 'eastOutpatient' : 'outpatient2';
+  const defaultTo = orderCampus === 'east' ? 'eastImaging' : 'medimaging';
   const [purpose, setPurpose] = useState('前往影像楼做 CT/MRI');
-  const [from, setFrom] = useState('outpatient2');
-  const [to, setTo] = useState('medimaging');
+  const [from, setFrom] = useState(defaultFrom);
+  const [to, setTo] = useState(defaultTo);
   const [mode, setMode] = useState<TransferMode>('wheelchair');
   const [needSupine, setNeedSupine] = useState(order.form.mobility === 'bedridden');
   const [canToilet, setCanToilet] = useState(order.form.mobility === 'self' || order.form.mobility === 'slow');
   const [familyWith, setFamilyWith] = useState(false);
   const [congestion, setCongestion] = useState<TransferSegment['congestion']>('一般');
+  const [formError, setFormError] = useState<string | null>(null);
+
+  // 仅允许选择本订单院区的点位（跨院检查请走「跨院区」功能）
+  const campusPoints = (Object.entries(LOCATIONS) as [string, typeof LOCATIONS[string]][])
+    .filter(([, def]) => def.campusId === orderCampus);
+  const fromKeys = campusPoints.filter(([k]) => ORIGIN_KEYS.includes(k));
+  const toKeys = campusPoints.filter(([k]) => !ORIGIN_KEYS.includes(k));
 
   // 卧位强制平车
   const effectiveMode: TransferMode = needSupine ? 'stretcher' : mode;
@@ -53,28 +65,59 @@ function TransferForm({ order }: { order: EscortOrder }) {
   const rental = effectiveMode === 'stretcher' ? 30 : 0;
   const svc = effectiveMode === 'stretcher' ? 40 : 0;
 
+  // 实时校验当前组合是否在本院区路线库中（不回退到其他院区）
+  const routeReady = isRouteConfigured(from, to);
+  const previewSegment = useMemo(() => {
+    if (!routeReady) return null;
+    try {
+      return buildSegment(from, to, effectiveMode, congestion);
+    } catch {
+      return null;
+    }
+  }, [from, to, effectiveMode, congestion, routeReady]);
+
+  const submit = () => {
+    const err = createTransfer(order.id, { purpose, from, to, mode, needSupine, canUseToiletIndependently: canToilet, familyAccompanying: familyWith, congestion });
+    setFormError(err);
+    if (!err) setPurpose('前往影像楼做 CT/MRI');
+  };
+
   return (
     <div className="card">
-      <h2>♿ 发起楼间转运（门诊楼 → 影像/内镜楼）</h2>
-      <div className="sub">用于行动不便患者跨楼检查：系统给出电梯位置、无障碍路线、轮椅押金与陪诊员预计耗时；卧位患者自动切换平车并预约医梯</div>
+      <h2>♿ 发起楼间转运（{campusName}）</h2>
+      <div className="sub">仅可选择<b>{campusName}</b>内的楼栋点位（系统按订单科室院区锁定）；系统给出该院区的无障碍路线、电梯位置、距离、拥堵提示与预计耗时。跨院区检查请使用「跨院区/换班」功能。</div>
 
       <div className="grid grid-2">
         <label className="field" style={{ margin: 0 }}>转运事由
           <input className="input" value={purpose} onChange={(e) => setPurpose(e.target.value)} />
         </label>
         <div className="grid grid-2" style={{ gap: 8 }}>
-          <label className="field" style={{ margin: 0 }}>起点
-            <select className="input" value={from} onChange={(e) => setFrom(e.target.value)}>
-              {Object.entries(LOCATIONS).filter(([k]) => k.startsWith('outpatient') || k === 'eastOutpatient').map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          <label className="field" style={{ margin: 0 }}>起点（{campusName}）
+            <select className="input" value={from} onChange={(e) => { setFrom(e.target.value); setFormError(null); }}>
+              {fromKeys.map(([k, def]) => <option key={k} value={k}>{def.label}</option>)}
             </select>
           </label>
-          <label className="field" style={{ margin: 0 }}>终点
-            <select className="input" value={to} onChange={(e) => setTo(e.target.value)}>
-              {Object.entries(LOCATIONS).filter(([k]) => k === 'medimaging' || k === 'endoscopy' || k === 'lab' || k === 'eastImaging').map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          <label className="field" style={{ margin: 0 }}>终点（{campusName}）
+            <select className="input" value={to} onChange={(e) => { setTo(e.target.value); setFormError(null); }}>
+              {toKeys.map(([k, def]) => <option key={k} value={k}>{def.label}</option>)}
             </select>
           </label>
         </div>
       </div>
+
+      {/* 路线配置校验：未配置时明确阻止，不回退总院路线 */}
+      {!routeReady && (
+        <div className="callout danger">
+          🚫 路线库尚未配置「{LOCATIONS[from]?.label} → {LOCATIONS[to]?.label}」（{campusName}）的无障碍路线、电梯位置与耗时。
+          <b>系统不会使用其他院区路线替代</b>，请联系服务台在路线库补充该组合后再创建；本次转运记录、家属提示、押金与费用均不会写入。
+        </div>
+      )}
+      {formError && <div className="callout danger">🚫 {formError}</div>}
+      {routeReady && previewSegment && (
+        <div className="callout teal">
+          ✅ 已匹配{campusName}路线：距离约 <b>{previewSegment.distanceMeters} 米</b>，预计耗时 <b>{previewSegment.estimatedMinutes} 分钟</b>（含等电梯，当前拥堵系数：{congestion}）。
+        </div>
+      )}
 
       <div className="field">
         <label>转运方式</label>
@@ -115,10 +158,12 @@ function TransferForm({ order }: { order: EscortOrder }) {
             <button key={c} type="button" className={`switch-opt ${congestion === c ? 'on' : ''}`} onClick={() => setCongestion(c)}>{c}</button>
           ))}
         </div>
-        {congestion === '拥堵' && <div className="callout danger" style={{ marginTop: 8 }}>{routeCongestedHint(from, to)}</div>}
+        {congestion === '拥堵' && routeReady && <div className="callout danger" style={{ marginTop: 8 }}>{routeCongestedHint(from, to)}</div>}
       </div>
 
-      <div className="grid grid-3" style={{ marginBottom: 8 }}>
+      {previewSegment && <RoutePreview seg={previewSegment} />}
+
+      <div className="grid grid-3" style={{ marginBottom: 8, marginTop: 10 }}>
         <div className="stat-tile"><div className="num" style={{ fontSize: 20 }}>{deposit} 元</div><div className="lb">{effectiveMode === 'stretcher' ? '平车' : '轮椅'}押金（归还退回）</div></div>
         <div className="stat-tile"><div className="num" style={{ fontSize: 20 }}>{rental + svc} 元</div><div className="lb">实缴费用（租借+转运）{rental ? `：租借${rental}+服务${svc}` : '轮椅免租金'}</div></div>
         <div className="stat-tile"><div className="num" style={{ fontSize: 20 }}>{needSupine ? '是' : '否'}</div><div className="lb">{needSupine ? '已含医梯预约' : '无需预约医梯'}</div></div>
@@ -126,9 +171,9 @@ function TransferForm({ order }: { order: EscortOrder }) {
 
       <button
         className="btn btn-primary"
-        disabled={!purpose.trim()}
-        onClick={() => createTransfer(order.id, { purpose, from, to, mode, needSupine, canUseToiletIndependently: canToilet, familyAccompanying: familyWith, congestion })}
-      >生成转运方案并同步家属（费用自动入账）</button>
+        disabled={!purpose.trim() || !routeReady}
+        onClick={submit}
+      >{routeReady ? '生成转运方案并同步家属（费用自动入账）' : '路线未配置，无法创建'}</button>
     </div>
   );
 }
@@ -149,6 +194,7 @@ function TransferCard({ order, t }: { order: EscortOrder; t: WheelchairTransfer 
         <span className={`badge ${st.cls}`}>{st.text}</span>
       </div>
       <div className="small" style={{ margin: '5px 0' }}>
+        <span className="badge blue" style={{ marginRight: 6 }}>{t.campusId === 'east' ? '东院区' : '总院'}</span>
         {t.fromLocation} → {t.toLocation} · {MODE_LABEL[t.mode]}
         {t.needSupine && <span className="badge orange" style={{ marginLeft: 6 }}>卧位·平车</span>}
         {!t.canUseToiletIndependently && <span className="badge blue" style={{ marginLeft: 6 }}>如厕需协助</span>}

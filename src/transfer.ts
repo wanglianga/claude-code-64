@@ -5,21 +5,39 @@ import type {
 } from './types';
 import { uid, nowISO } from './plan';
 
-/** 院内关键楼栋点位 */
-export const LOCATIONS: Record<string, string> = {
-  outpatient1: '门诊 1 号楼大厅',
-  outpatient2: '门诊 2 号楼候诊区',
-  outpatient3: '门诊 3 号楼',
-  medimaging: '医技楼（影像中心）',
-  endoscopy: '内镜中心楼',
-  lab: '门诊 1 号楼 2 层检验科',
-  eastOutpatient: '东院门诊楼',
-  eastImaging: '东院医技楼',
+/** 路线库未配置某起终点组合时抛出：调用方必须阻止创建，禁止回退到其他院区路线 */
+export class TransferRouteNotConfiguredError extends Error {
+  constructor(public from: string, public to: string, public campus: string) {
+    super(`院内无障碍路线库未配置「${from} → ${to}」（${campus}），请先在路线库补充该组合的无障碍路线、电梯位置、距离与拥堵提示，暂不能创建转运`);
+    this.name = 'TransferRouteNotConfiguredError';
+  }
+}
+
+export interface LocationDef {
+  label: string;
+  campusId: string;
+  campusName: string;
+}
+
+/** 院内关键楼栋点位（必须绑定院区，防止跨院区误用路线） */
+export const LOCATIONS: Record<string, LocationDef> = {
+  outpatient1: { label: '门诊 1 号楼大厅', campusId: 'main', campusName: '总院' },
+  outpatient2: { label: '门诊 2 号楼候诊区', campusId: 'main', campusName: '总院' },
+  outpatient3: { label: '门诊 3 号楼', campusId: 'main', campusName: '总院' },
+  medimaging: { label: '医技楼（影像中心）', campusId: 'main', campusName: '总院' },
+  endoscopy: { label: '内镜中心楼', campusId: 'main', campusName: '总院' },
+  lab: { label: '门诊 1 号楼 2 层检验科', campusId: 'main', campusName: '总院' },
+  eastOutpatient: { label: '东院门诊楼', campusId: 'east', campusName: '东院区' },
+  eastImaging: { label: '东院医技楼', campusId: 'east', campusName: '东院区' },
+  eastLab: { label: '东院门诊楼 2 层检验科', campusId: 'east', campusName: '东院区' },
 };
+
+export const ORIGIN_KEYS = ['outpatient1', 'outpatient2', 'outpatient3', 'eastOutpatient'];
 
 interface RouteDef {
   from: string;
   to: string;
+  campusId: string;
   distanceMeters: number;
   /** 无障碍路线（轮椅/平车可走） */
   accessible: string[];
@@ -28,10 +46,14 @@ interface RouteDef {
   congestedHint: string;
 }
 
-/** 院内楼栋间无障碍路线库（含电梯位置） */
+/**
+ * 院内楼栋间无障碍路线库。
+ * 每个院区单独配置；不存在的组合不得回退到其他院区路线。
+ */
 const ROUTES: RouteDef[] = [
+  // ============ 总院 ============
   {
-    from: 'outpatient1', to: 'medimaging', distanceMeters: 260,
+    from: 'outpatient1', to: 'medimaging', campusId: 'main', distanceMeters: 260,
     accessible: [
       '门诊 1 号楼 1 层大厅西侧无障碍坡道出正门',
       '沿地面黄色无障碍指引线西行约 260 米（避开门诊大厅自动扶梯）',
@@ -43,7 +65,7 @@ const ROUTES: RouteDef[] = [
     congestedHint: '地面连廊 09:00-10:30 人流密集，轮椅推行降至约 0.5 m/s；建议改走 2 层空中连廊（遮雨、人少），在 1 号楼乘 3 号医梯上 2 层，连廊直通医技楼 2 层再乘医梯下行。',
   },
   {
-    from: 'outpatient2', to: 'medimaging', distanceMeters: 320,
+    from: 'outpatient2', to: 'medimaging', campusId: 'main', distanceMeters: 320,
     accessible: [
       '门诊 2 号楼中部乘 3 号低速医梯（停靠全楼层）到 2 层',
       '走 2 层空中连廊（遮雨连廊）直达医技楼 2 层',
@@ -53,10 +75,10 @@ const ROUTES: RouteDef[] = [
       { name: '门诊 2 号楼 3 号医梯', location: '2 号楼中部，候诊区北侧', note: '低速医梯，轮椅平车优先；梯门宽 1.1m' },
       { name: '医技楼 2 号医用电梯', location: '连廊出口即达', note: '可提前电话 8002 预约梯位' },
     ],
-    congestedHint: '连廊中午前较空；若 3 号医梯排队超 10 分钟，可呼叫志愿服务台（8001）安排志愿者在医技楼端接应平车。',
+    congestedHint: '连廊中午前较空；若 3 号医梯排队超 10 分钟，可呼叫总院志愿服务台（8001）安排志愿者在医技楼端接应平车。',
   },
   {
-    from: 'outpatient3', to: 'medimaging', distanceMeters: 380,
+    from: 'outpatient3', to: 'medimaging', campusId: 'main', distanceMeters: 380,
     accessible: [
       '门诊 3 号楼 1 层乘 1 号无障碍直梯',
       '出楼沿无障碍通道经中心花园北侧缓坡（坡度 1:12）',
@@ -66,10 +88,10 @@ const ROUTES: RouteDef[] = [
       { name: '3 号楼 1 号无障碍直梯', location: '骨科诊区东侧', note: '带盲文与语音播报，平车可入' },
       { name: '医技楼 2 号医用电梯', location: '医技楼东门', note: '拥堵时建议预约' },
     ],
-    congestedHint: '花园缓坡雨天湿滑需慢行；拥堵时优先联系志愿服务台，或把影像检查调整到当日 10:30 后错峰。',
+    congestedHint: '花园缓坡雨天湿滑需慢行；拥堵时优先联系总院志愿服务台，或把影像检查调整到当日 10:30 后错峰。',
   },
   {
-    from: 'outpatient2', to: 'endoscopy', distanceMeters: 420,
+    from: 'outpatient2', to: 'endoscopy', campusId: 'main', distanceMeters: 420,
     accessible: [
       '门诊 2 号楼 1 层无障碍通道出北门',
       '沿连廊步行约 420 米到达内镜中心楼',
@@ -81,7 +103,7 @@ const ROUTES: RouteDef[] = [
     congestedHint: '内镜中心上午为高峰，卧位患者务必提前预约医梯与复苏位，否则等待可能超 30 分钟。',
   },
   {
-    from: 'outpatient1', to: 'lab', distanceMeters: 60,
+    from: 'outpatient1', to: 'lab', campusId: 'main', distanceMeters: 60,
     accessible: [
       '门诊 1 号楼大厅乘 2 号无障碍电梯上 2 层',
       '出梯左转沿无障碍走廊到检验科采血区',
@@ -90,6 +112,32 @@ const ROUTES: RouteDef[] = [
       { name: '门诊 1 号楼 2 号无障碍电梯', location: '大厅东侧，收费窗口旁', note: '距离采血区最近，轮椅优先' },
     ],
     congestedHint: '空腹高峰 07:30-09:00，可在 1 层先取采血号再上楼。',
+  },
+
+  // ============ 东院区 ============
+  {
+    from: 'eastOutpatient', to: 'eastImaging', campusId: 'east', distanceMeters: 180,
+    accessible: [
+      '东院门诊楼 1 层走西侧无障碍通道（宽 1.8m，无台阶）',
+      '经两楼之间的遮雨连廊推行约 180 米（连廊两侧均有无障碍坡道）',
+      '到达东院医技楼后从一层无障碍入口进入：CT/DR 在 1 层可直达；如需其他楼层乘 1 号医梯',
+    ],
+    elevators: [
+      { name: '东院医技楼 1 号医用电梯', location: '东院医技楼一层大厅右侧', note: '可容平车，停靠全部楼层；东院志愿者服务台电话 8101，可提前预约接应' },
+      { name: '东院门诊楼无障碍直梯', location: '门诊楼大厅西侧无障碍通道旁', note: '下楼至连廊层无需换乘，平车可入' },
+    ],
+    congestedHint: '东院早高峰 08:30-10:00 连廊抽血人流较多；可联系东院志愿服务台（8101）在医技楼端接应，或把 HRCT 调整到 10:00 后错峰。',
+  },
+  {
+    from: 'eastOutpatient', to: 'eastLab', campusId: 'east', distanceMeters: 40,
+    accessible: [
+      '东院门诊楼大厅西侧乘无障碍直梯上 2 层',
+      '出梯右转沿无障碍走廊约 40 米到东院检验科采血区',
+    ],
+    elevators: [
+      { name: '东院门诊楼无障碍直梯', location: '门诊楼大厅西侧', note: '轮椅平车优先，梯门宽 1.1m' },
+    ],
+    congestedHint: '东院空腹采血高峰 07:30-09:00，可先在一层自助机取号再上楼。',
   },
 ];
 
@@ -100,22 +148,45 @@ const SPEED = {
   walkAssist: 30,
 };
 
-/** 依据起终点与模式构建一段转运（路线+耗时+拥堵） */
+export function findRoute(from: string, to: string): RouteDef {
+  const route = ROUTES.find((r) => r.from === from && r.to === to);
+  if (!route) {
+    const campus = LOCATIONS[from]?.campusName ?? '未知院区';
+    throw new TransferRouteNotConfiguredError(LOCATIONS[from]?.label ?? from, LOCATIONS[to]?.label ?? to, campus);
+  }
+  return route;
+}
+
+export function isRouteConfigured(from: string, to: string): boolean {
+  return ROUTES.some((r) => r.from === from && r.to === to);
+}
+
+/** 校验起终点必须同院区；跨院区走「跨院区」交通功能而非院内转运 */
+export function assertSameCampus(from: string, to: string): void {
+  const f = LOCATIONS[from];
+  const t = LOCATIONS[to];
+  if (f && t && f.campusId !== t.campusId) {
+    throw new TransferRouteNotConfiguredError(f.label, t.label, `${f.campusName}↔${t.campusName}（跨院区）`);
+  }
+}
+
+/** 依据起终点与模式构建一段转运（路线+耗时+拥堵）；路线缺失时抛错，不回退 */
 export function buildSegment(
   from: string,
   to: string,
   mode: TransferMode,
   congestion: TransferSegment['congestion'] = '一般',
 ): TransferSegment {
-  const def = ROUTES.find((r) => r.from === from && r.to === to) ?? ROUTES[0];
+  assertSameCampus(from, to);
+  const def = findRoute(from, to); // 缺失即抛错，绝不使用其他院区路线兜底
   const speed = SPEED[mode];
   const congestFactor = congestion === '拥堵' ? 1.7 : congestion === '一般' ? 1.25 : 1;
   const elevatorWait = mode === 'stretcher' ? 8 : 5;
   const estimatedMinutes = Math.max(3, Math.round((def.distanceMeters / speed) * congestFactor + elevatorWait));
   return {
     id: uid('seg'),
-    fromLocation: LOCATIONS[from] ?? from,
-    toLocation: LOCATIONS[to] ?? to,
+    fromLocation: LOCATIONS[from].label,
+    toLocation: LOCATIONS[to].label,
     routeSteps: def.accessible,
     elevators: def.elevators,
     distanceMeters: def.distanceMeters,
@@ -125,13 +196,20 @@ export function buildSegment(
 }
 
 export function routeCongestedHint(from: string, to: string): string {
-  return (ROUTES.find((r) => r.from === from && r.to === to) ?? ROUTES[0]).congestedHint;
+  assertSameCampus(from, to);
+  return findRoute(from, to).congestedHint;
 }
 
 export const CONGESTION_TIP: Record<TransferSegment['congestion'], string> = {
   畅通: '路线畅通，按无障碍指引推行即可',
   一般: '人流中等，已按 1.25 倍折算耗时',
-  拥堵: '路线拥堵：系统建议提前联系志愿服务台（拨 8001）安排志愿者接应，或把影像检查调整到错峰时段',
+  拥堵: '路线拥堵：系统建议提前联系本院区志愿服务台安排志愿者接应，或把影像检查调整到错峰时段',
+};
+
+/** 志愿台/总机按院区区分 */
+export const CAMPUS_SERVICE_PHONE: Record<string, string> = {
+  main: '8001（总院志愿服务台）',
+  east: '8101（东院志愿服务台）',
 };
 
 const FEE_TABLE = {
@@ -151,11 +229,17 @@ export interface TransferInput {
   congestion: TransferSegment['congestion'];
 }
 
-/** 构建完整转运方案（含费用、卧位/如厕/随行的现场服务备注） */
+/**
+ * 构建完整转运方案。
+ * 起终点非同院区或路线库缺失时抛 TransferRouteNotConfiguredError，
+ * 调用方必须捕获并阻止创建（不得写入转运记录/家属提示/押金/费用）。
+ */
 export function buildTransfer(input: TransferInput): WheelchairTransfer {
   // 卧位强制平车
   const mode: TransferMode = input.needSupine ? 'stretcher' : input.mode;
-  const seg = buildSegment(input.from, input.to, mode, input.congestion);
+  const seg = buildSegment(input.from, input.to, mode, input.congestion); // 缺失组合在此抛错
+  const campusId = LOCATIONS[input.from].campusId;
+  const servicePhone = CAMPUS_SERVICE_PHONE[campusId] ?? '';
 
   const deposit = FEE_TABLE.deposit[mode];
   const rentalFee = FEE_TABLE.rental[mode];
@@ -167,7 +251,7 @@ export function buildTransfer(input: TransferInput): WheelchairTransfer {
     notes.push('患者需卧位：已切换为医用平车，须预约可容平车的医用电梯与检查位；');
   }
   if (!input.canUseToiletIndependently) {
-    notes.push('患者无法独立如厕：转运前先陪同如厕/穿戴护理垫，平车配便孔位，影像楼 B1 有无障碍卫生间（CT 室旁 20 米）；');
+    notes.push('患者无法独立如厕：转运前先陪同如厕/穿戴护理垫，平车配便孔位，检查楼一层有无障碍卫生间；');
   } else {
     notes.push('患者可独立如厕：告知沿途无障碍卫生间位置即可；');
   }
@@ -181,9 +265,11 @@ export function buildTransfer(input: TransferInput): WheelchairTransfer {
   }
 
   const modeName = mode === 'wheelchair' ? '轮椅' : mode === 'stretcher' ? '医用平车' : '搀扶步行';
+  const campusName = LOCATIONS[input.from].campusName;
 
   return {
     id: uid('tr'),
+    campusId,
     purpose: input.purpose,
     fromLocation: seg.fromLocation,
     toLocation: seg.toLocation,
@@ -200,7 +286,7 @@ export function buildTransfer(input: TransferInput): WheelchairTransfer {
     elevatorReservation: mode === 'stretcher',
     elevatorReservationTime: mode === 'stretcher' ? '建议提前 15 分钟预约' : undefined,
     segments: [seg],
-    note: `【${modeName}转运 · ${input.purpose}】${seg.fromLocation} → ${seg.toLocation}，距离约 ${seg.distanceMeters} 米，陪诊员预计耗时 ${seg.estimatedMinutes} 分钟（含等电梯）。` + notes.join(''),
+    note: `【${campusName} · ${modeName}转运 · ${input.purpose}】${seg.fromLocation} → ${seg.toLocation}，距离约 ${seg.distanceMeters} 米，陪诊员预计耗时 ${seg.estimatedMinutes} 分钟（含等电梯），志愿服务台 ${servicePhone}。` + notes.join(''),
     congestionAction,
   };
 }

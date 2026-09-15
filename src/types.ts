@@ -271,6 +271,8 @@ export interface TransferSegment {
 
 export interface WheelchairTransfer {
   id: string;
+  /** 院区（起终点必须同院区） */
+  campusId: string;
   /** 关联检查环节/项目名称 */
   purpose: string;
   fromLocation: string;

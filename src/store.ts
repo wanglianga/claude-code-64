@@ -226,7 +226,7 @@ interface AppState {
   confirmAddonAssistant: (orderId: string, addonId: string, note: string) => void;
 
   // 轮椅 / 平车院内转运协同
-  createTransfer: (orderId: string, input: TransferInput) => void;
+  createTransfer: (orderId: string, input: TransferInput) => string | null;
   updateTransferStatus: (orderId: string, transferId: string, status: TransferStatus) => void;
   requestTransferVolunteer: (orderId: string, transferId: string) => void;
   reserveTransferElevator: (orderId: string, transferId: string, time: string) => void;
@@ -905,7 +905,21 @@ export const useStore = create<AppState>()(
 
       // —— 轮椅 / 平车院内转运协同 ——
       createTransfer: (orderId, input) => {
-        const t = buildTransfer(input);
+        let t: ReturnType<typeof buildTransfer>;
+        try {
+          t = buildTransfer(input); // 路线库缺失/跨院区时在此抛错
+        } catch (e) {
+          // 绝不回退到其他院区路线：不写转运记录、不写家属提示、不写押金与费用
+          const message = e instanceof Error ? e.message : '转运路线配置缺失';
+          set((s) => ({
+            orders: s.orders.map((o) => o.id !== orderId ? o : {
+              ...o,
+              messages: [...o.messages, orderMsg(`♿ 转运创建已阻止：${message}`, 'status')],
+            }),
+          }));
+          return message;
+        }
+        const servicePhone = t.campusId === 'east' ? '8101（东院志愿服务台）' : '8001（总院志愿服务台）';
         set((s) => ({
           orders: s.orders.map((o) => {
             if (o.id !== orderId) return o;
@@ -921,13 +935,14 @@ export const useStore = create<AppState>()(
               fees,
               messages: [
                 ...o.messages,
-                orderMsg(`♿ 已生成转运方案【${t.purpose}】${t.fromLocation} → ${t.toLocation}（${t.mode === 'wheelchair' ? '轮椅' : t.mode === 'stretcher' ? '医用平车' : '搀扶步行'}），预计耗时 ${t.segments[0].estimatedMinutes} 分钟、距离 ${t.segments[0].distanceMeters} 米。${t.needSupine ? '卧位患者已自动切换平车并预约医梯；' : ''}${t.note}`, 'status'),
+                orderMsg(`♿ 已生成${t.campusId === 'east' ? '东院' : '总院'}转运方案【${t.purpose}】${t.fromLocation} → ${t.toLocation}（${t.mode === 'wheelchair' ? '轮椅' : t.mode === 'stretcher' ? '医用平车' : '搀扶步行'}），预计耗时 ${t.segments[0].estimatedMinutes} 分钟、距离 ${t.segments[0].distanceMeters} 米。${t.needSupine ? '卧位患者已自动切换平车并预约医梯；' : ''}${t.note}`, 'status'),
                 ...feeMsgs,
-                ...(t.congestionAction === 'volunteer' ? [orderMsg('⚠ 检测到该路线拥堵：建议提前联系志愿服务台（8001）安排接应，或调整检查顺序错峰。', 'auth')] : []),
+                ...(t.congestionAction === 'volunteer' ? [orderMsg(`⚠ 检测到该路线拥堵：建议提前联系${servicePhone}安排接应，或调整检查顺序错峰。`, 'auth')] : []),
               ],
             };
           }),
         }));
+        return null;
       },
 
       updateTransferStatus: (orderId, transferId, status) => {
@@ -1037,9 +1052,9 @@ export const useStore = create<AppState>()(
       resetAll: () => set({ orders: seedOrders(), initialized: true }),
     }),
     {
-      // v2：空腹核查改为系统盖戳时间源派生（旧版手填时长数据不兼容；更换 key 后旧缓存自动失效并重新播种）
-      name: 'warm-sun-escort-v2',
-      version: 2,
+      // v3：转运记录绑定院区、路线库缺失即拦截（旧缓存结构不兼容，更换 key 自动重新播种）
+      name: 'warm-sun-escort-v3',
+      version: 3,
       onRehydrateStorage: () => (state) => {
         if (state && state.orders.length === 0) state.orders = seedOrders();
         if (state) state.initialized = true;
