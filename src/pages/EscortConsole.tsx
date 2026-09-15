@@ -5,6 +5,7 @@ import { fmtDateTime, buildCrossCampus, reportReadyText } from '../plan';
 import type { IncidentType, ServiceArchive } from '../types';
 import { ChatPanel, FeeTable, MaterialChecklist, StageStepper, StatusBadge } from '../ui';
 import FastingAddonPanel from './FastingAddonPanel';
+import TransferPanel from './TransferPanel';
 
 const INCIDENT_TYPE_LABEL: Record<IncidentType, string> = {
   fasting: '空腹低血糖风险',
@@ -37,7 +38,7 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
   const dept = DEPARTMENTS.find((d) => d.id === order.form.departmentId)!;
   const campus = CAMPUSES.find((c) => c.id === dept.campusId)!;
 
-  const [tab, setTab] = useState<'board' | 'fasting' | 'incident' | 'cross' | 'sync' | 'archive'>('board');
+  const [tab, setTab] = useState<'board' | 'transfer' | 'fasting' | 'incident' | 'cross' | 'sync' | 'archive'>('board');
   const [regTime, setRegTime] = useState(order.advice.registerTime);
   const [selStage, setSelStage] = useState(order.activeStageIndex);
 
@@ -145,6 +146,7 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
       {/* Tabs */}
       <div className="tabs" style={{ marginTop: 14 }}>
         <button className={`tab ${tab === 'board' ? 'on' : ''}`} onClick={() => setTab('board')}>🧭 阶段引导/路线</button>
+        <button className={`tab ${tab === 'transfer' ? 'on' : ''}`} onClick={() => setTab('transfer')}>♿ 轮椅/平车转运</button>
         <button className={`tab ${tab === 'fasting' ? 'on' : ''}`} onClick={() => setTab('fasting')}>
           🍚 临时空腹加项 {pendingFasting > 0 && <span className="badge red" style={{ marginLeft: 6 }}>{pendingFasting}</span>}
         </button>
@@ -158,6 +160,9 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
 
       {/* ===== 临时空腹加项 ===== */}
       {tab === 'fasting' && (order.status === 'ongoing' || order.status === 'accepted') && <FastingAddonPanel order={order} />}
+
+      {/* ===== 轮椅/平车转运 ===== */}
+      {tab === 'transfer' && (order.status === 'ongoing' || order.status === 'accepted') && <TransferPanel order={order} />}
 
       {/* ===== 阶段引导 ===== */}
       {tab === 'board' && order.status === 'ongoing' && (
@@ -213,6 +218,12 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
                 )}
                 {stage.key === 'blood' && order.form.fasting && (
                   <div className="callout danger">空腹项目：优先 1 号空腹采血区，抽完立即提醒患者进食随身早餐，观察 10 分钟防低血糖。</div>
+                )}
+                {(stage.key === 'blood' || stage.key === 'image') && (
+                  <div className="callout info">
+                    需要从门诊楼前往医技楼/内镜楼且患者行动不便？
+                    <button className="btn btn-sm" style={{ marginLeft: 8 }} onClick={() => setTab('transfer')}>♿ 发起轮椅/平车转运（路线·电梯·押金·耗时）</button>
+                  </div>
                 )}
                 {(stage.key === 'blood' || stage.key === 'image') && (
                   <div>

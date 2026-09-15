@@ -158,14 +158,29 @@ export interface AuthorizationRequest {
   responder?: string;
 }
 
-/** 医生临时加开空腹抽血/胃镜：进食核查结果 */
+/** 医生临时加开空腹抽血/胃镜：进食核查结果（时间戳为唯一可信事实源，时长全部派生） */
 export interface FastingCheck {
-  eaten: boolean; // 是否已进食
-  lastMealTime?: string; // 末次进食时间 HH:mm
-  /** 距末次进食时长（小时，由陪诊员填写/选择） */
-  fastingHours?: number;
-  /** 患者基础病风险（糖尿病/低血糖史等，来自病历） */
+  /** 系统盖戳：陪诊员提交核查的时刻 ISO（可信时钟，陪诊员不可修改） */
+  checkedAt: string;
+  /** 末次进食发生日（相对核查时刻） */
+  mealDay: 'today' | 'yesterday' | 'earlier';
+  /** 末次进食钟点 HH:mm */
+  lastMealTime: string;
+  /** 患者基础病风险（糖尿病/低血糖史等，来自病历，可编辑） */
   riskNote: string;
+
+  // —— 以下全部由 checkedAt + mealDay + lastMealTime 计算，UI 不允许手填 ——
+  /** 末次进食的绝对时间 ISO */
+  lastMealAt: string;
+  /** 已空腹分钟数（派生） */
+  fastingMinutes: number;
+  fastingHours: number;
+  /** 陪诊员选择"今日"但时间晚于当前时刻时，系统自动修正为昨日并留痕 */
+  adjusted: boolean;
+  adjustedReason?: string;
+  /** 录入是否通过校验（未来时间等异常） */
+  valid: boolean;
+  invalidReason?: string;
 }
 
 /** 检查顺序调整后重算的票据/时间 */
@@ -231,6 +246,55 @@ export interface RecomputedSchedule {
   /** 原回诊时间 */
   originalRevisitTime?: string;
   note: string;
+}
+
+// ============ 轮椅 / 平车 院内转运协同 ============
+export type TransferMode = 'wheelchair' | 'stretcher' | 'walkAssist';
+export type TransferStatus = 'planned' | 'volunteerRequested' | 'elevatorBooked' | 'enroute' | 'arrived' | 'cancelled';
+
+/** 一段院内转运：门诊楼 ↔ 影像楼等 */
+export interface TransferSegment {
+  id: string;
+  fromLocation: string;
+  toLocation: string;
+  /** 无障碍/最短路线步骤 */
+  routeSteps: string[];
+  /** 电梯位置与使用说明 */
+  elevators: { name: string; location: string; note: string }[];
+  /** 步行/推行距离（米） */
+  distanceMeters: number;
+  /** 陪诊员预计耗时（分钟，含等电梯） */
+  estimatedMinutes: number;
+  /** 当前拥堵程度（影响耗时与是否需要求助） */
+  congestion: '畅通' | '一般' | '拥堵';
+}
+
+export interface WheelchairTransfer {
+  id: string;
+  /** 关联检查环节/项目名称 */
+  purpose: string;
+  fromLocation: string;
+  toLocation: string;
+  mode: TransferMode;
+  status: TransferStatus;
+  createdAt: string;
+
+  // 患者现场因素
+  needSupine: boolean; // 是否需要卧位 → 平车
+  canUseToiletIndependently: boolean; // 是否可独立上厕所
+  familyAccompanying: boolean; // 家属是否随行
+
+  // 资源与费用
+  deposit: number; // 轮椅/平车押金
+  rentalFee: number; // 租借费
+  transportFee: number; // 平车转运/志愿者服务费
+  volunteerRequested: boolean;
+  elevatorReservation: boolean; // 是否预约医梯
+  elevatorReservationTime?: string;
+  segments: TransferSegment[];
+
+  note: string;
+  congestionAction?: 'volunteer' | 'reorder' | null; // 拥堵处置：联系志愿台 / 调整检查顺序
 }
 
 /** 空腹加项三方案视图（持久化，供家属端查看） */
@@ -328,6 +392,8 @@ export interface EscortOrder {
   authorizations: AuthorizationRequest[];
   /** 医生临时加开的空腹项目冲突处置（可能多个） */
   fastingAddons: FastingAddonConflict[];
+  /** 轮椅 / 平车院内转运协同记录 */
+  transfers: WheelchairTransfer[];
   emotionNote?: string; // 情绪安抚记录
   archive?: ServiceArchive;
 }

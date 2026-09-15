@@ -284,6 +284,7 @@ export function buildOrderSkeleton(form: BookingForm, id: string, code: string):
     exams: buildExamItems(form),
     authorizations: [],
     fastingAddons: [],
+    transfers: [],
   };
 }
 
@@ -365,6 +366,64 @@ export function estimateOriginalRevisit(order: EscortOrder, now = new Date()): D
   return atTime(base, mins + 20);
 }
 
+/**
+ * 构建进食核查结论：以「系统盖戳时间」为唯一可信时钟，
+ * 末次进食绝对时间 + 空腹分钟数全部派生，陪诊员不能手填时长。
+ * - mealDay='today' 但钟点晚于当前时刻 → 判定为昨日（自动修正并留痕）
+ * - earlier（前天及更早）按昨日 24:00 前 24h 计，视为已充分空腹
+ */
+export function buildFastingCheck(input: { mealDay: 'today' | 'yesterday' | 'earlier'; lastMealTime: string; riskNote: string }, now = new Date()): FastingCheck {
+  const { mealDay, lastMealTime, riskNote } = input;
+  const [hStr, mStr] = lastMealTime.split(':');
+  const h = Number(hStr);
+  const m = Number(mStr ?? 0);
+  const valid = /^\d{2}:\d{2}$/.test(lastMealTime) && h >= 0 && h <= 23 && m >= 0 && m <= 59;
+
+  const meal = new Date(now);
+  meal.setSeconds(0, 0);
+  let adjusted = false;
+  let adjustedReason: string | undefined;
+  let effectiveDay = mealDay;
+
+  if (valid) {
+    meal.setHours(h, m, 0, 0);
+    if (mealDay === 'today' && meal.getTime() > now.getTime()) {
+      // 今日钟点晚于当前时刻 → 不可能今天发生，自动修正为昨日
+      meal.setDate(meal.getDate() - 1);
+      effectiveDay = 'yesterday';
+      adjusted = true;
+      adjustedReason = `选择「今日 ${lastMealTime}」晚于当前时刻 ${hhmm(now)}，系统已按昨日 ${lastMealTime} 计算`;
+    } else if (mealDay === 'yesterday') {
+      meal.setDate(meal.getDate() - 1);
+    } else if (mealDay === 'earlier') {
+      // 前天或更早：至少空腹 24 小时
+      meal.setTime(now.getTime() - 24 * 3600_000);
+    }
+  }
+
+  const fastingMinutes = valid ? Math.max(0, Math.round((now.getTime() - meal.getTime()) / 60000)) : 0;
+  const fastingHours = fastingMinutes / 60;
+
+  return {
+    checkedAt: now.toISOString(),
+    mealDay: effectiveDay,
+    lastMealTime: valid ? lastMealTime : '',
+    riskNote,
+    lastMealAt: valid ? meal.toISOString() : '',
+    fastingMinutes,
+    fastingHours: Math.round(fastingHours * 10) / 10,
+    adjusted,
+    adjustedReason,
+    valid,
+    invalidReason: valid ? undefined : '末次进食时间格式无效',
+  };
+}
+
+/** 是否达到该项目的空腹要求（唯一判定口径） */
+export function fastingEligible(check: FastingCheck, requiredHours: number): boolean {
+  return check.valid && check.fastingMinutes >= requiredHours * 60;
+}
+
 /** 发起一条空腹加项冲突（陪诊员在医生开单后发起） */
 export function createFastingAddon(examId: string, now = new Date()): FastingAddonConflict {
   const def = ADDON_EXAMS.find((x) => x.id === examId)!;
@@ -398,23 +457,20 @@ export function buildAddonPlans(order: EscortOrder, addonId: string, check: Fast
   const start = round5(now);
   const originalRevisit = estimateOriginalRevisit(order, now);
 
-  // 空腹合规窗口：末次进食 + 要求小时数
-  let fastingReady: Date | null = null;
-  if (!check.eaten && check.lastMealTime) {
-    const [h, m] = check.lastMealTime.split(':').map(Number);
-    const last = new Date(now);
-    last.setHours(h, m ?? 0, 0, 0);
-    if (last.getTime() > now.getTime()) last.setDate(last.getDate() - 1); // 昨夜进食
-    fastingReady = atTime(last, def.fastingHoursRequired);
-  }
-  const hours = check.fastingHours ?? 0;
-  const waitEligible = !check.eaten && hours >= def.fastingHoursRequired;
+  // 唯一判定口径：空腹时长由系统盖戳时间 - 末次进食时间派生，陪诊员无法手填
+  const waitEligible = fastingEligible(check, def.fastingHoursRequired);
+  // 达到空腹要求的时刻（末次进食 + 要求小时数），用于判断今日是否还排得上
+  const fastingReady = check.valid ? new Date(new Date(check.lastMealAt).getTime() + def.fastingHoursRequired * 3600_000) : null;
+  const hours = check.fastingHours;
 
   // 今日非空腹在途项目（顺序重排的对象）
   const otherExams = EXAMS.filter((e) => order.form.examIds.includes(e.id) && !e.needFasting);
   const otherMins = otherExams.reduce((s, e) => s + e.queueMinutes, 0);
 
   const risk = check.riskNote ? `（病史风险：${check.riskNote}）` : '';
+  const mealDesc = check.valid
+    ? `${check.mealDay === 'yesterday' ? '昨日' : check.mealDay === 'earlier' ? '前天或更早' : '今日'} ${check.lastMealTime}`
+    : '时间无效';
 
   // —— 方案 A：继续等待，今日空腹优先完成 ——
   const tPay = atTime(start, 5);
@@ -469,8 +525,9 @@ export function buildAddonPlans(order: EscortOrder, addonId: string, check: Fast
   const tPayC = atTime(start, 5);
   const tOther0 = atTime(tPayC, 20);
   const tOtherDone = atTime(tOther0, otherMins + 20);
-  // 空腹项安排：若现在仍满足空腹条件且上午能排上 → 今日其他项目后；否则次日晨
-  const sameDayPossible = waitEligible && fastingReady !== null && tOtherDone.getHours() < 10 && atTime(tOtherDone, def.queueMinutes).getHours() < 11;
+  // 空腹项安排：满足空腹要求且其他项目结束后仍能在上午排上 → 今日接续；否则次日晨
+  const sameDayPossible = waitEligible && fastingReady !== null && fastingReady.getTime() <= now.getTime()
+    && tOtherDone.getHours() < 10 && atTime(tOtherDone, def.queueMinutes).getHours() < 11;
   const addonDate = sameDayPossible ? tOtherDone : (() => { const d = new Date(now); d.setDate(d.getDate() + 1); d.setHours(8, 0, 0, 0); if (d.getDay() === 0) d.setDate(d.getDate() + 1); return d; })();
   const tRevisitC = sameDayPossible
     ? atTime(addonDate, def.queueMinutes + def.turnaroundMinutes + 20)
@@ -500,8 +557,8 @@ export function buildAddonPlans(order: EscortOrder, addonId: string, check: Fast
       feasible: waitEligible,
       title: '继续等待 · 今日空腹优先',
       text: waitEligible
-        ? `患者${check.lastMealTime ? `末次进食 ${check.lastMealTime}，` : ''}已空腹 ${hours} 小时，满足 ${def.fastingHoursRequired} 小时要求。缴费后优先赴${def.location}，约 ${hhmm(tAddon)} 可做、${hhmm(tAddonDone)} 前完成；陪诊员全程备糖、每 15 分钟观察低血糖表现${risk}。`
-        : `❌ 不可行：患者${check.eaten ? `已于 ${check.lastMealTime} 进食` : `空腹仅 ${hours} 小时`}，未达 ${def.fastingHoursRequired} 小时空腹要求，强行检查结果失真且麻醉（胃镜）有反流误吸风险。`,
+        ? `患者末次进食${mealDesc}，距系统盖戳核查时刻已空腹 ${hours} 小时，满足 ${def.fastingHoursRequired} 小时要求。缴费后优先赴${def.location}，约 ${hhmm(tAddon)} 可做、${hhmm(tAddonDone)} 前完成；陪诊员全程备糖、每 15 分钟观察低血糖表现${risk}。`
+        : `❌ 不可行：患者末次进食${mealDesc}，按系统盖戳时间计算仅空腹 ${hours} 小时，未达 ${def.fastingHoursRequired} 小时要求，强行检查结果失真且麻醉（胃镜）有反流误吸风险。`,
       feeDelta: waitSchedule.extraFeeTotal,
       schedule: waitSchedule,
       revisitImpacted: waitImpacted,

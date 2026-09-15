@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ADDON_EXAMS } from '../data';
+import { buildFastingCheck, fastingEligible } from '../plan';
 import { useStore } from '../store';
-import type { EscortOrder, FastingAddonConflict, FastingCheck } from '../types';
+import type { EscortOrder, FastingAddonConflict } from '../types';
 import { AddonPlanCard, RecomputedScheduleView } from '../ui';
 
 const STATUS_LABEL: Record<FastingAddonConflict['status'], { text: string; cls: string }> = {
@@ -15,38 +16,63 @@ const STATUS_LABEL: Record<FastingAddonConflict['status'], { text: string; cls: 
 function EatingCheckForm({ order, addon }: { order: EscortOrder; addon: FastingAddonConflict }) {
   const submitFastingCheck = useStore((s) => s.submitFastingCheck);
   const def = ADDON_EXAMS.find((x) => x.id === addon.examId)!;
-  const [eaten, setEaten] = useState(false);
+  // 默认昨日 20:30（常见晚餐时间，真实空腹 10+ 小时）
+  const [mealDay, setMealDay] = useState<'today' | 'yesterday' | 'earlier'>('yesterday');
   const [lastMeal, setLastMeal] = useState('20:30');
-  const [hours, setHours] = useState(12);
   const historyRisk = /糖尿病|低血糖|高血压|冠心|心脏/.test(order.form.medicalHistory) ? `基础病：${order.form.medicalHistory}` : '';
   const [risk, setRisk] = useState(historyRisk);
+  const [now, setNow] = useState(() => new Date());
+
+  // 页面打开期间每 30 秒刷新一次"当前时刻"，保证预览结论实时
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // 关键：空腹时长仅由系统时钟 - 末次进食时间实时派生，陪诊员不能手填
+  const preview = buildFastingCheck({ mealDay, lastMealTime: lastMeal, riskNote: risk }, now);
+  const eligible = fastingEligible(preview, def.fastingHoursRequired);
 
   return (
     <div className="callout warn">
-      <b>第一步 · 立即核查患者进食情况</b>（{def.name}，要求禁食 {def.fastingHoursRequired} 小时）
-      <div className="switch-row" style={{ margin: '8px 0' }}>
-        <button className={`switch-opt ${!eaten ? 'on' : ''}`} onClick={() => { setEaten(false); setHours(12); }}>未进食（仍空腹）</button>
-        <button className={`switch-opt ${eaten ? 'on' : ''}`} onClick={() => { setEaten(true); setHours(0); }}>已进食</button>
+      <b>第一步 · 核查患者末次进食</b>（{def.name}，要求禁食 {def.fastingHoursRequired} 小时）
+      <div className="small muted" style={{ margin: '4px 0 8px' }}>
+        系统当前时刻 <b className="mono">{now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</b>；空腹时长由系统按此盖戳时间自动计算，无需也不能手填。
       </div>
-      <div className="grid grid-2">
-        <label className="small">末次进食时间
-          <input type="time" className="input" value={lastMeal} onChange={(e) => setLastMeal(e.target.value)} />
-        </label>
-        <label className="small">距末次进食（小时）
-          <input type="number" className="input" value={hours} min={0} max={24} onChange={(e) => setHours(Number(e.target.value))} />
-        </label>
+      <label className="small">末次进食时间
+        <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+          <select className="input" style={{ width: 130 }} value={mealDay} onChange={(e) => setMealDay(e.target.value as typeof mealDay)}>
+            <option value="today">今日</option>
+            <option value="yesterday">昨日</option>
+            <option value="earlier">前天或更早</option>
+          </select>
+          <input type="time" className="input" style={{ width: 130 }} value={lastMeal} onChange={(e) => setLastMeal(e.target.value)} />
+        </div>
+        <div className="hint">若选"今日"但钟点晚于当前时刻，系统会自动改判为昨日并留痕（时间不可晚于当前时刻）。</div>
+      </label>
+
+      {/* 实时核查结论（与最终三方案同一口径） */}
+      <div className={`callout ${eligible ? 'ok' : 'danger'}`} style={{ margin: '8px 0' }}>
+        {!preview.valid
+          ? '❓ 请选择有效的末次进食钟点（HH:mm）'
+          : <>
+            系统计算：末次进食 {preview.mealDay === 'yesterday' ? '昨日' : preview.mealDay === 'earlier' ? '前天或更早' : '今日'} {preview.lastMealTime}
+            → 已空腹 <b>{preview.fastingHours} 小时</b>（{preview.fastingMinutes} 分钟）；
+            {eligible
+              ? <> ✅ 已达到 {def.fastingHoursRequired} 小时要求，当日空腹方案<b>可选</b>。</>
+              : <> ❌ 未达到 {def.fastingHoursRequired} 小时，当日空腹抽血/胃镜方案将<b>不可选</b>，只能改约或先做其他项目。</>}
+          </>}
+        {preview.adjusted && <div className="small" style={{ marginTop: 4 }}>（已自动修正：{preview.adjustedReason}）</div>}
       </div>
+
       <label className="small">风险提示（既往病历自动带入，可修改）
         <textarea className="input" value={risk} onChange={(e) => setRisk(e.target.value)} placeholder="如糖尿病史→空腹低血糖风险；胃镜→麻醉误吸风险" />
       </label>
       <button
         className="btn btn-primary btn-sm"
-        disabled={!lastMeal}
-        onClick={() => {
-          const check: FastingCheck = { eaten, lastMealTime: lastMeal, fastingHours: hours, riskNote: risk };
-          submitFastingCheck(order.id, addon.id, check);
-        }}
-      >确认核查结果，生成三方案并同步家属</button>
+        disabled={!preview.valid}
+        onClick={() => submitFastingCheck(order.id, addon.id, { mealDay, lastMealTime: lastMeal, riskNote: risk })}
+      >确认核查结果（系统盖戳），生成三方案并同步家属</button>
     </div>
   );
 }

@@ -6,16 +6,17 @@ import type {
   ChatMessage,
   CrossCampusTrip,
   EscortOrder,
-  FastingCheck,
   FeeItem,
   Incident,
   IncidentType,
   Role,
   ServiceArchive,
   StageKey,
+  TransferStatus,
 } from './types';
 import { ADDON_EXAMS, CAMPUSES, ESCORTS } from './data';
-import { buildAddonPlans, createFastingAddon, buildOrderSkeleton, nowISO, reportReadyText, todayStr, uid } from './plan';
+import { buildAddonPlans, buildFastingCheck, createFastingAddon, buildOrderSkeleton, nowISO, reportReadyText, todayStr, uid } from './plan';
+import { buildTransfer, transferFeeTotal, type TransferInput } from './transfer';
 
 // ============ 异常处置模板：当前状态 → 下一步选项 → 费用变化 → 是否需家属授权 ============
 export interface IncidentTemplate {
@@ -220,9 +221,16 @@ interface AppState {
 
   // 医生临时加开空腹项目（抽血/胃镜）
   raiseFastingAddon: (orderId: string, examId: string) => void;
-  submitFastingCheck: (orderId: string, addonId: string, check: FastingCheck) => void;
+  submitFastingCheck: (orderId: string, addonId: string, input: { mealDay: 'today' | 'yesterday' | 'earlier'; lastMealTime: string; riskNote: string }) => void;
   familyChooseAddonPlan: (orderId: string, addonId: string, planKey: 'wait' | 'reschedule' | 'othersFirst', responder: string) => void;
   confirmAddonAssistant: (orderId: string, addonId: string, note: string) => void;
+
+  // 轮椅 / 平车院内转运协同
+  createTransfer: (orderId: string, input: TransferInput) => void;
+  updateTransferStatus: (orderId: string, transferId: string, status: TransferStatus) => void;
+  requestTransferVolunteer: (orderId: string, transferId: string) => void;
+  reserveTransferElevator: (orderId: string, transferId: string, time: string) => void;
+  reorderForTransferCongestion: (orderId: string, transferId: string) => void;
 
   // 档案 / 完成
   archiveOrder: (orderId: string, archive: ServiceArchive) => void;
@@ -774,25 +782,35 @@ export const useStore = create<AppState>()(
         }));
       },
 
-      submitFastingCheck: (orderId, addonId, check) => {
+      submitFastingCheck: (orderId, addonId, input) => {
         set((s) => ({
           orders: s.orders.map((o) => {
             if (o.id !== orderId) return o;
             const addon = o.fastingAddons.find((a) => a.id === addonId);
             if (!addon) return o;
+            // 系统盖戳：以服务端时钟为唯一事实源构建核查结论（陪诊员不能手填空腹时长）
+            const check = buildFastingCheck(input);
+            if (!check.valid) {
+              return {
+                ...o,
+                messages: [...o.messages, orderMsg(`🍚 空腹核查被拒绝：末次进食时间「${input.lastMealTime}」无效，请重新选择末次进食日期与钟点。`, 'status')],
+              };
+            }
             const plans = buildAddonPlans(o, addonId, check);
             const def = ADDON_EXAMS.find((x) => x.id === addon.examId)!;
             const anyImpacted = plans.some((p) => p.feasible && p.revisitImpacted);
-            const eating = check.eaten
-              ? `患者已于 ${check.lastMealTime ?? '近期'} 进食`
-              : `患者未进食，末次进食 ${check.lastMealTime ?? '—'}，已空腹 ${check.fastingHours ?? 0} 小时（要求 ${def.fastingHoursRequired} 小时）`;
+            const waitPlan = plans.find((p) => p.key === 'wait');
+            const eating = `患者末次进食${check.mealDay === 'yesterday' ? '昨日' : check.mealDay === 'earlier' ? '前天或更早' : '今日'} ${check.lastMealTime}，按系统盖戳时间计算已空腹 ${check.fastingHours} 小时（要求 ${def.fastingHoursRequired} 小时）`;
             const feasible = plans.filter((p) => p.feasible).map((p) => p.title).join('；');
             return {
               ...o,
               fastingAddons: o.fastingAddons.map((a) => a.id === addonId
                 ? { ...a, check, plans, status: 'awaitingFamily' as const, revisitImpacted: anyImpacted, planWait: plans[0]?.text ?? '', planReschedule: plans[1]?.text ?? '', planOthersFirst: plans[2]?.text ?? '' }
                 : a),
-              messages: [...o.messages, orderMsg(`🍚 空腹加项核查完成：${eating}。${check.riskNote ? `风险：${check.riskNote}。` : ''}可行方案：${feasible}。请家属在「空腹加项处置」中选择；系统已对缴费、取号、回诊时间整体重算，避免后续排队失效。`, 'auth')],
+              messages: [
+                ...o.messages,
+                ...(check.adjusted ? [orderMsg(`🍚 时间自动修正：${check.adjustedReason}`, 'status')] : []),
+                orderMsg(`🍚 空腹加项核查完成（系统盖戳 ${new Date(check.checkedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}）：${eating}。${check.riskNote ? `风险：${check.riskNote}。` : ''}${waitPlan && !waitPlan.feasible ? `「继续等待」不可行（未达 ${def.fastingHoursRequired} 小时）；` : ''}可行方案：${feasible}。请家属在「空腹加项处置」中选择；三方案的缴费、取号、回诊时间均由同一核查结论整体重算。`, 'auth')],
             };
           }),
         }));
@@ -885,6 +903,95 @@ export const useStore = create<AppState>()(
         }));
       },
 
+      // —— 轮椅 / 平车院内转运协同 ——
+      createTransfer: (orderId, input) => {
+        const t = buildTransfer(input);
+        set((s) => ({
+          orders: s.orders.map((o) => {
+            if (o.id !== orderId) return o;
+            const fees = [...o.fees];
+            if (t.rentalFee > 0) fees.push({ id: uid('fee'), label: `${t.mode === 'stretcher' ? '医用平车' : '轮椅'}租借费（${t.purpose}）`, amount: t.rentalFee, at: nowISO(), category: 'other' });
+            if (t.transportFee > 0) fees.push({ id: uid('fee'), label: `平车转运服务费（${t.purpose}）`, amount: t.transportFee, at: nowISO(), category: 'other' });
+            const feeMsgs: ChatMessage[] = [];
+            if (t.deposit > 0) feeMsgs.push(orderMsg(`♿ 转运押金：${t.mode === 'stretcher' ? '平车' : '轮椅'}押金 ${t.deposit} 元（归还后原路退回，非消费，不计入应缴）。`, 'fee'));
+            if (transferFeeTotal(t) > 0) feeMsgs.push(orderMsg(`【费用同步】转运费用：${t.rentalFee ? `租借 ${t.rentalFee} 元` : ''}${t.transportFee ? `转运服务 ${t.transportFee} 元` : ''}，合计实缴 ${transferFeeTotal(t)} 元，已计入费用清单。`, 'fee'));
+            return {
+              ...o,
+              transfers: [t, ...o.transfers],
+              fees,
+              messages: [
+                ...o.messages,
+                orderMsg(`♿ 已生成转运方案【${t.purpose}】${t.fromLocation} → ${t.toLocation}（${t.mode === 'wheelchair' ? '轮椅' : t.mode === 'stretcher' ? '医用平车' : '搀扶步行'}），预计耗时 ${t.segments[0].estimatedMinutes} 分钟、距离 ${t.segments[0].distanceMeters} 米。${t.needSupine ? '卧位患者已自动切换平车并预约医梯；' : ''}${t.note}`, 'status'),
+                ...feeMsgs,
+                ...(t.congestionAction === 'volunteer' ? [orderMsg('⚠ 检测到该路线拥堵：建议提前联系志愿服务台（8001）安排接应，或调整检查顺序错峰。', 'auth')] : []),
+              ],
+            };
+          }),
+        }));
+      },
+
+      updateTransferStatus: (orderId, transferId, status) => {
+        set((s) => ({
+          orders: s.orders.map((o) => {
+            if (o.id !== orderId) return o;
+            const labelMap: Record<TransferStatus, string> = {
+              planned: '已规划', volunteerRequested: '已呼叫志愿者', elevatorBooked: '医梯已预约', enroute: '转运途中', arrived: '已到达检查点', cancelled: '已取消',
+            };
+            return {
+              ...o,
+              transfers: o.transfers.map((t) => t.id === transferId ? { ...t, status } : t),
+              messages: [...o.messages, orderMsg(`♿ 转运状态更新：${labelMap[status]}。`, 'status')],
+            };
+          }),
+        }));
+      },
+
+      requestTransferVolunteer: (orderId, transferId) => {
+        set((s) => ({
+          orders: s.orders.map((o) => {
+            if (o.id !== orderId) return o;
+            return {
+              ...o,
+              transfers: o.transfers.map((t) => t.id === transferId ? { ...t, volunteerRequested: true, status: t.status === 'planned' ? 'volunteerRequested' : t.status } : t),
+              messages: [...o.messages, orderMsg('📞 已联系志愿服务台（8001）：请求志愿者在影像楼端接应并协助医梯，预计 5 分钟到位；已同步家属。', 'auth')],
+            };
+          }),
+        }));
+      },
+
+      reserveTransferElevator: (orderId, transferId, time) => {
+        set((s) => ({
+          orders: s.orders.map((o) => {
+            if (o.id !== orderId) return o;
+            return {
+              ...o,
+              transfers: o.transfers.map((t) => t.id === transferId ? { ...t, elevatorReservation: true, elevatorReservationTime: time, status: t.status === 'planned' || t.status === 'volunteerRequested' ? 'elevatorBooked' : t.status } : t),
+              messages: [...o.messages, orderMsg(`🛗 已预约医用电梯：${time}（平车优先梯位），志愿者与陪诊员在梯口交接。`, 'status')],
+            };
+          }),
+        }));
+      },
+
+      reorderForTransferCongestion: (orderId, transferId) => {
+        set((s) => ({
+          orders: s.orders.map((o) => {
+            if (o.id !== orderId) return o;
+            const t = o.transfers.find((x) => x.id === transferId);
+            if (!t) return o;
+            // 拥堵改序：把影像类环节排队时长按错峰下调，并写入提示
+            const stages = o.stages.map((st) => (st.key === 'image' && st.waitMinutes && st.waitMinutes > 30)
+              ? { ...st, waitMinutes: Math.round(st.waitMinutes * 0.6), note: `路线/检查厅拥堵，已调整顺序错峰（10:30 后），排队由原预估下调至 ${Math.round(st.waitMinutes * 0.6)} 分钟；转运方案：${t.purpose}` }
+              : st);
+            return {
+              ...o,
+              stages,
+              transfers: o.transfers.map((x) => x.id === transferId ? { ...x, congestionAction: 'reorder' as const, note: x.note + ' 【已调整检查顺序错峰】' } : x),
+              messages: [...o.messages, orderMsg('🔀 因转运路线拥堵，已与检查科室沟通把影像项目调整到 10:30 后错峰时段，并相应重排取号顺序；陪诊员先陪患者完成同楼层/近距离项目。', 'auth')],
+            };
+          }),
+        }));
+      },
+
       archiveOrder: (orderId, archive) => {
         set((s) => ({
           orders: s.orders.map((o) => {
@@ -930,7 +1037,9 @@ export const useStore = create<AppState>()(
       resetAll: () => set({ orders: seedOrders(), initialized: true }),
     }),
     {
-      name: 'warm-sun-escort-v1',
+      // v2：空腹核查改为系统盖戳时间源派生（旧版手填时长数据不兼容；更换 key 后旧缓存自动失效并重新播种）
+      name: 'warm-sun-escort-v2',
+      version: 2,
       onRehydrateStorage: () => (state) => {
         if (state && state.orders.length === 0) state.orders = seedOrders();
         if (state) state.initialized = true;

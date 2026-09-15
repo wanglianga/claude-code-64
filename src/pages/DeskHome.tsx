@@ -77,6 +77,9 @@ export default function DeskHome(_: { onOpen: (id: string) => void }) {
                 {(o.fastingAddons ?? []).some((a) => a.status === 'awaitingFamily') && <span className="badge orange" style={{ marginLeft: 6 }}>空腹加项待家属选方案</span>}
                 {(o.fastingAddons ?? []).some((a) => ['wait', 'othersFirst'].includes(a.status) && a.revisitImpacted && !a.assistantConfirmed) && <span className="badge red" style={{ marginLeft: 6 }}>回诊待医生助理确认</span>}
                 {o.crossCampus && <>　<span className="badge blue">跨院区 · {({ planned: '已规划', enroute: '前往中', checking: '检查中', returned: '已返院' })[o.crossCampus.status]}</span></>}
+                {(o.transfers ?? []).filter((t) => t.status !== 'arrived' && t.status !== 'cancelled').length > 0 && (
+                  <span className="badge teal" style={{ marginLeft: 6 }}>♿ 转运{({ planned: '已规划', volunteerRequested: '志愿者接应中', elevatorBooked: '医梯已约', enroute: '转运途中', arrived: '已到达', cancelled: '取消' })[o.transfers.find((t) => t.status !== 'arrived')!.status]}</span>
+                )}
                 {o.handover && <span className="badge orange" style={{ marginLeft: 6 }}>已换班{!o.handover.acknowledgedByFamily && '·待家属确认'}</span>}
               </div>
             </div>

@@ -97,6 +97,46 @@ export default function FamilyOrder({ orderId, onBack }: { orderId: string; onBa
         </div>
       )}
 
+      {/* 轮椅/平车转运 */}
+      {order.transfers && order.transfers.length > 0 && (
+        <div className="card">
+          <h2>♿ 院内转运协同（轮椅 / 平车）</h2>
+          {order.transfers.map((t) => {
+            const seg = t.segments[0];
+            const modeName = t.mode === 'wheelchair' ? '轮椅' : t.mode === 'stretcher' ? '医用平车（卧位）' : '搀扶步行';
+            return (
+              <div key={t.id} className="inc-card" style={{ borderLeft: '4px solid var(--primary)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                  <b>{t.purpose}</b>
+                  <span className="badge teal">{({ planned: '已规划', volunteerRequested: '已呼叫志愿者', elevatorBooked: '医梯已预约', enroute: '转运途中', arrived: '已到达检查点', cancelled: '已取消' })[t.status]}</span>
+                </div>
+                <div className="small" style={{ margin: '5px 0' }}>
+                  {t.fromLocation} → {t.toLocation} · {modeName}
+                  {t.needSupine && <span className="badge orange" style={{ marginLeft: 6 }}>卧位</span>}
+                  {!t.canUseToiletIndependently && <span className="badge blue" style={{ marginLeft: 6 }}>如厕需协助</span>}
+                  <span className="badge gray" style={{ marginLeft: 6 }}>{t.familyAccompanying ? '家属随行' : '家属未随行'}</span>
+                </div>
+                <div className="grid grid-3" style={{ margin: '6px 0' }}>
+                  <span className="small">距离 <b>{seg.distanceMeters} 米</b></span>
+                  <span className="small">预计耗时 <b>{seg.estimatedMinutes} 分钟</b></span>
+                  <span className="small">路线拥堵：<b>{seg.congestion}</b></span>
+                </div>
+                <details>
+                  <summary className="small" style={{ cursor: 'pointer', color: 'var(--primary)' }}>查看无障碍路线与电梯位置</summary>
+                  {seg.routeSteps.map((r, i) => <div key={i} className="route-step"><span className="idx">{i + 1}</span><span className="txt">{r}</span></div>)}
+                  {seg.elevators.map((e, i) => <div key={i} className="callout info">🛗 {e.name}（{e.location}）：{e.note}</div>)}
+                </details>
+                <div className="small" style={{ marginTop: 6 }}>
+                  押金 <b>{t.deposit} 元</b>（归还退回）；实缴 <b style={{ color: 'var(--danger)' }}>{t.rentalFee + t.transportFee} 元</b>
+                  {t.volunteerRequested && <span className="badge orange" style={{ marginLeft: 8 }}>已联系志愿服务台接应</span>}
+                  {t.elevatorReservation && <span className="badge blue" style={{ marginLeft: 8 }}>医梯已预约（{t.elevatorReservationTime}）</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* 跨院区 */}
       {order.crossCampus && (
         <div className="card">
@@ -173,8 +213,11 @@ export default function FamilyOrder({ orderId, onBack }: { orderId: string; onBa
               </div>
               {a.check && (
                 <div className="small" style={{ margin: '6px 0' }}>
-                  进食核查：{a.check.eaten ? `已进食（${a.check.lastMealTime}）` : `未进食，末次 ${a.check.lastMealTime}，已空腹 ${a.check.fastingHours} 小时`}
+                  进食核查（系统 {new Date(a.check.checkedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 盖戳）：
+                  末次进食{a.check.mealDay === 'yesterday' ? '昨日' : a.check.mealDay === 'earlier' ? '前天或更早' : '今日'} {a.check.lastMealTime}
+                  → 系统计算已空腹 <b>{a.check.fastingHours} 小时</b>
                   {a.check.riskNote ? `；${a.check.riskNote}` : ''}
+                  {a.check.adjusted && <span className="badge orange" style={{ marginLeft: 6 }}>时间已自动修正</span>}
                 </div>
               )}
               {a.status === 'checking' && <div className="callout warn" style={{ margin: 0 }}>陪诊员正在确认患者是否已进食、当日检查顺序和可改约时间，方案稍后同步。</div>}
