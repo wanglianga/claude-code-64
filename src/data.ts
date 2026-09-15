@@ -265,3 +265,51 @@ export const MOBILITY_LABELS: Record<string, string> = {
 };
 
 export const RATING_TAGS = ['路线熟悉', '沟通及时', '耐心安抚', '动作麻利', '费用透明', '主动同步进度'];
+
+/**
+ * 医生临时加开项目目录（现场开单，不在患者预约的原始检查单内）
+ * 均为空腹要求项目：用于演示「临时加空腹抽血 / 胃镜」冲突
+ */
+export interface AddonDef {
+  id: string;
+  name: string;
+  kind: 'blood' | 'gastroscopy';
+  building: string;
+  location: string;
+  needFasting: boolean;
+  fastingHoursRequired: number; // 要求禁食小时数
+  reportHours: number;
+  fee: number;
+  queueMinutes: number;
+  /** 完成检查后到能回诊的额外耗时（出报告/苏醒观察等） */
+  turnaroundMinutes: number;
+}
+
+export const ADDON_EXAMS: AddonDef[] = [
+  {
+    id: 'addon-fasting-glucose',
+    name: '空腹血糖 + 糖化血红蛋白（医生临时加抽）',
+    kind: 'blood',
+    building: '门诊 1 号楼',
+    location: '2 层 检验科 1 号空腹采血区',
+    needFasting: true,
+    fastingHoursRequired: 8,
+    reportHours: 4,
+    fee: 60,
+    queueMinutes: 25,
+    turnaroundMinutes: 60,
+  },
+  {
+    id: 'addon-gastroscopy',
+    name: '无痛胃镜（医生临时预约加做）',
+    kind: 'gastroscopy',
+    building: '内镜中心楼',
+    location: '3 层 内镜 2 室（含麻醉评估与术后苏醒观察）',
+    needFasting: true,
+    fastingHoursRequired: 8,
+    reportHours: 24,
+    fee: 650,
+    queueMinutes: 40,
+    turnaroundMinutes: 120,
+  },
+];

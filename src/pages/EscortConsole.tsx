@@ -4,6 +4,7 @@ import { INCIDENT_TEMPLATES, feeTotal, useStore } from '../store';
 import { fmtDateTime, buildCrossCampus, reportReadyText } from '../plan';
 import type { IncidentType, ServiceArchive } from '../types';
 import { ChatPanel, FeeTable, MaterialChecklist, StageStepper, StatusBadge } from '../ui';
+import FastingAddonPanel from './FastingAddonPanel';
 
 const INCIDENT_TYPE_LABEL: Record<IncidentType, string> = {
   fasting: '空腹低血糖风险',
@@ -36,7 +37,7 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
   const dept = DEPARTMENTS.find((d) => d.id === order.form.departmentId)!;
   const campus = CAMPUSES.find((c) => c.id === dept.campusId)!;
 
-  const [tab, setTab] = useState<'board' | 'incident' | 'cross' | 'sync' | 'archive'>('board');
+  const [tab, setTab] = useState<'board' | 'fasting' | 'incident' | 'cross' | 'sync' | 'archive'>('board');
   const [regTime, setRegTime] = useState(order.advice.registerTime);
   const [selStage, setSelStage] = useState(order.activeStageIndex);
 
@@ -56,6 +57,14 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
   const [handoverList, setHandoverList] = useState('');
   const [extraFeeLabel, setExtraFeeLabel] = useState('');
   const [extraFeeAmt, setExtraFeeAmt] = useState(0);
+  const [blockMsg, setBlockMsg] = useState<string | null>(null);
+  const pendingFasting = order.fastingAddons?.filter((a) => a.status === 'awaitingFamily' || a.status === 'checking').length ?? 0;
+
+  const doAdvance = () => {
+    const blocked = advanceStage(order.id);
+    setBlockMsg(blocked);
+    if (!blocked) setTab('board');
+  };
 
   const [archiveForm, setArchiveForm] = useState<ServiceArchive>({
     diagnosis: '',
@@ -136,6 +145,9 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
       {/* Tabs */}
       <div className="tabs" style={{ marginTop: 14 }}>
         <button className={`tab ${tab === 'board' ? 'on' : ''}`} onClick={() => setTab('board')}>🧭 阶段引导/路线</button>
+        <button className={`tab ${tab === 'fasting' ? 'on' : ''}`} onClick={() => setTab('fasting')}>
+          🍚 临时空腹加项 {pendingFasting > 0 && <span className="badge red" style={{ marginLeft: 6 }}>{pendingFasting}</span>}
+        </button>
         <button className={`tab ${tab === 'incident' ? 'on' : ''}`} onClick={() => setTab('incident')}>
           ⚠ 异常处置 {openIncidents.length > 0 && <span className="badge red" style={{ marginLeft: 6 }}>{openIncidents.length}</span>}
         </button>
@@ -143,6 +155,9 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
         <button className={`tab ${tab === 'sync' ? 'on' : ''}`} onClick={() => setTab('sync')}>💬 家属同步/费用</button>
         <button className={`tab ${tab === 'archive' ? 'on' : ''}`} onClick={() => setTab('archive')}>📁 结束归档</button>
       </div>
+
+      {/* ===== 临时空腹加项 ===== */}
+      {tab === 'fasting' && (order.status === 'ongoing' || order.status === 'accepted') && <FastingAddonPanel order={order} />}
 
       {/* ===== 阶段引导 ===== */}
       {tab === 'board' && order.status === 'ongoing' && (
@@ -171,6 +186,14 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
 
             {stage.status === 'active' && (
               <>
+                {blockMsg && (
+                  <div className="callout danger">
+                    🚫 {blockMsg}
+                    <div style={{ marginTop: 6 }}>
+                      <button className="btn btn-sm btn-danger" onClick={() => setTab('fasting')}>前往「临时空腹加项」处理</button>
+                    </div>
+                  </div>
+                )}
                 <div className="grid grid-2">
                   <div className="field">
                     <label>现场实际排队/等待（分钟，用于同步家属与复盘）</label>
@@ -184,7 +207,8 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
 
                 {stage.key === 'consult' && (
                   <div className="callout warn">
-                    医生开单后：逐项核对检查单——若发现缺项，到「⚠ 异常处置」发起【检查单缺项】；若医生临时停诊，发起【医生临时停诊】。
+                    医生开单后：逐项核对检查单——若发现缺项，到「⚠ 异常处置」发起【检查单缺项】；若医生临时停诊，发起【医生临时停诊】；
+                    <b>若医生临时加开空腹抽血或胃镜</b>，立即到「🍚 临时空腹加项」核查进食并重算方案。
                   </div>
                 )}
                 {stage.key === 'blood' && order.form.fasting && (
@@ -218,7 +242,7 @@ export default function EscortConsole({ orderId, escortId, onBack }: { orderId: 
 
                 <div className="sticky-actions" style={{ position: 'static', marginTop: 14 }}>
                   <button className="btn" onClick={() => postStatusSync(order.id, syncText)}>先同步家属，暂不推进</button>
-                  {stage.key !== 'done' && <button className="btn btn-primary" onClick={() => advanceStage(order.id)}>完成本环节，进入下一步 →</button>}
+                  {stage.key !== 'done' && <button className="btn btn-primary" onClick={doAdvance}>完成本环节，进入下一步 →</button>}
                   {stage.key === 'done' && <button className="btn btn-primary" onClick={() => setTab('archive')}>全部完成，去归档 →</button>}
                 </div>
               </>

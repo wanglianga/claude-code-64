@@ -2,13 +2,14 @@ import { useState } from 'react';
 import { CAMPUSES, DEPARTMENTS, ESCORTS, RATING_TAGS } from '../data';
 import { useStore } from '../store';
 import { fmtDateTime, reportReadyText } from '../plan';
-import { ChatPanel, FeeTable, MaterialChecklist, ReportReadyHint, StageStepper, Stars, StatusBadge } from '../ui';
+import { AddonPlanCard, ChatPanel, FeeTable, MaterialChecklist, ReportReadyHint, StageStepper, Stars, StatusBadge } from '../ui';
 
 export default function FamilyOrder({ orderId, onBack }: { orderId: string; onBack: () => void }) {
   const order = useStore((s) => s.orders.find((o) => o.id === orderId))!;
   const decideAuthorization = useStore((s) => s.decideAuthorization);
   const acknowledgeHandover = useStore((s) => s.acknowledgeHandover);
   const rateOrder = useStore((s) => s.rateOrder);
+  const familyChooseAddonPlan = useStore((s) => s.familyChooseAddonPlan);
 
   const [rating, setRating] = useState(order.archive?.rating ?? 5);
   const [tags, setTags] = useState<string[]>(order.archive?.ratingTags ?? []);
@@ -150,6 +151,59 @@ export default function FamilyOrder({ orderId, onBack }: { orderId: string; onBa
                 </div>
               )}
               {a.status !== 'pending' && <div className="small muted" style={{ marginTop: 6 }}>{a.responder} 于 {fmtDateTime(a.decidedAt)} {a.status === 'approved' ? '授权' : '拒绝'}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 医生临时加开空腹项目：三方案选择 */}
+      {order.fastingAddons && order.fastingAddons.length > 0 && (
+        <div className="card">
+          <h2>🍚 医生临时加开空腹项目 · 方案选择</h2>
+          <div className="sub">陪诊员已核查患者进食情况，并对当日检查顺序、缴费、取号与回诊时间做了整体重算，请家属选择下一步</div>
+          {order.fastingAddons.map((a) => (
+            <div key={a.id} className="inc-card" style={{ borderLeft: '4px solid var(--primary)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                <b>{a.examName}</b>
+                {a.status === 'checking' && <span className="badge orange">陪诊员核查进食中…</span>}
+                {a.status === 'awaitingFamily' && <span className="badge red">待您选择</span>}
+                {a.status === 'wait' && <span className="badge blue">已选：继续等待·今日空腹完成</span>}
+                {a.status === 'reschedule' && <span className="badge gray">已选：改日检查</span>}
+                {a.status === 'othersFirst' && <span className="badge teal">已选：先做其他项目</span>}
+              </div>
+              {a.check && (
+                <div className="small" style={{ margin: '6px 0' }}>
+                  进食核查：{a.check.eaten ? `已进食（${a.check.lastMealTime}）` : `未进食，末次 ${a.check.lastMealTime}，已空腹 ${a.check.fastingHours} 小时`}
+                  {a.check.riskNote ? `；${a.check.riskNote}` : ''}
+                </div>
+              )}
+              {a.status === 'checking' && <div className="callout warn" style={{ margin: 0 }}>陪诊员正在确认患者是否已进食、当日检查顺序和可改约时间，方案稍后同步。</div>}
+              {a.status !== 'checking' && a.plans && (
+                <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+                  {a.plans.map((p) => (
+                    <AddonPlanCard
+                      key={p.key}
+                      plan={p}
+                      selected={a.chosenPlan === p.key}
+                      disabled={a.status === 'awaitingFamily' ? false : true}
+                      onSelect={a.status === 'awaitingFamily' ? () => familyChooseAddonPlan(order.id, a.id, p.key, contact) : undefined}
+                      actionLabel={p.key === 'wait' ? '继续等待，今日空腹完成' : p.key === 'reschedule' ? '同意改日检查' : '先做其他项目'}
+                    />
+                  ))}
+                </div>
+              )}
+              {a.revisitImpacted && (a.status === 'wait' || a.status === 'othersFirst') && (
+                <div className="callout danger" style={{ marginTop: 10 }}>
+                  {a.assistantConfirmed
+                    ? `✅ 陪诊员已联系医生助理确认新回诊时间（${a.assistantNote}）`
+                    : '⚠ 回诊时间因顺序调整改变，陪诊员将先联系医生助理确认号源后再进入回诊，请留意同步。'}
+                </div>
+              )}
+              {a.status === 'reschedule' && (
+                <div className="callout info" style={{ marginTop: 10 }}>
+                  改约时间：{a.rescheduleDate ?? a.rescheduleOptions[0]}；今日回诊自动顺延，改约前一日陪诊员会电话提醒禁食。
+                </div>
+              )}
             </div>
           ))}
         </div>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ChatMessage, EscortOrder, MaterialItem, OrderStatus, ServiceArchive } from './types';
+import type { AddonPlanView, ChatMessage, EscortOrder, MaterialItem, OrderStatus, RecomputedSchedule, ServiceArchive } from './types';
 import { feeTotal, useStore } from './store';
 import { fmtTime } from './plan';
 import { EXAMS } from './data';
@@ -155,6 +155,67 @@ export function ReportReadyHint({ order }: { order: EscortOrder }) {
 
 export function Empty({ text }: { text: string }) {
   return <div className="empty">📭 {text}</div>;
+}
+
+/** 空腹加项方案中「缴费/取号/回诊」重算结果 */
+export function RecomputedScheduleView({ schedule, compact }: { schedule: RecomputedSchedule; compact?: boolean }) {
+  return (
+    <div className="recompute" style={{ border: '1px solid var(--line)', borderRadius: 9, padding: '10px 12px', marginTop: 8, background: '#fbfdfe' }}>
+      <div className="small" style={{ fontWeight: 700, marginBottom: 6 }}>🧮 检查顺序调整后重算（缴费 / 取号 / 回诊）</div>
+      <table className="fee-table" style={{ fontSize: 12.5 }}>
+        <thead><tr><th>环节</th><th>取号票</th><th>呼叫时间</th><th>排队</th><th className="amt">费用</th></tr></thead>
+        <tbody>
+          {schedule.tickets.map((t, i) => (
+            <tr key={i}>
+              <td>{t.label}{t.note ? <div className="muted" style={{ fontSize: 11.5 }}>{t.note}</div> : null}</td>
+              <td className="mono small">{t.ticketNo || '—'}</td>
+              <td className="small">{t.callTime}</td>
+              <td className="small">{t.waitMinutes} 分</td>
+              <td className={`amt ${t.fee ? '' : 'muted'}`}>{t.fee ? `${t.fee} 元` : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 8 }}>
+        <span className="small">原回诊：<b>{schedule.originalRevisitTime}</b></span>
+        <span className="small">重算回诊：<b style={{ color: 'var(--primary-dark)' }}>{schedule.revisitTime}</b></span>
+        <span className="small">新增费用合计：<b style={{ color: schedule.extraFeeTotal ? 'var(--danger)' : 'var(--ok)' }}>{schedule.extraFeeTotal ? `+${schedule.extraFeeTotal} 元` : '0 元'}</b></span>
+      </div>
+      {!compact && <div className="callout warn" style={{ margin: '8px 0 0' }}>{schedule.note}</div>}
+    </div>
+  );
+}
+
+/** 单个方案卡（可点选择） */
+export function AddonPlanCard({
+  plan, selected, disabled, onSelect, actionLabel,
+}: {
+  plan: AddonPlanView;
+  selected?: boolean;
+  disabled?: boolean;
+  onSelect?: () => void;
+  actionLabel?: string;
+}) {
+  return (
+    <div className={`inc-opt ${selected ? 'chosen' : ''}`} style={{ display: 'block', padding: 0, borderRadius: 10, overflow: 'hidden', borderColor: selected ? 'var(--ok)' : plan.feasible ? undefined : 'var(--ink-3)', opacity: plan.feasible ? 1 : 0.65 }}>
+      <div style={{ padding: '10px 12px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <b>{plan.title}</b>
+          <span className={`badge ${plan.feasible ? (plan.revisitImpacted ? 'orange' : 'green') : 'red'}`}>
+            {!plan.feasible ? '当前不可行' : plan.revisitImpacted ? '回诊时间受影响' : '回诊不受影响'}
+          </span>
+        </div>
+        <div className="small" style={{ margin: '6px 0' }}>{plan.text}</div>
+        <RecomputedScheduleView schedule={plan.schedule} compact />
+        {onSelect && plan.feasible && (
+          <button className={`btn btn-sm ${selected ? '' : 'btn-primary'}`} style={{ marginTop: 8 }} disabled={disabled} onClick={onSelect}>
+            {selected ? '✓ 已选择' : actionLabel ?? '选择此方案'}
+          </button>
+        )}
+        {!plan.feasible && <div className="small" style={{ color: 'var(--danger)', marginTop: 6 }}>需待空腹达标或改约，不可选择此项</div>}
+      </div>
+    </div>
+  );
 }
 
 export function Spent({ archive }: { archive?: ServiceArchive }) {

@@ -114,6 +114,9 @@ export interface StageState {
   startedAt?: string;
   completedAt?: string;
   waitMinutes?: number; // 可能的排队时长
+  /** 顺序调整后重算的取号票号 / 呼叫时间 */
+  ticketNo?: string;
+  callTime?: string;
   note?: string;
 }
 
@@ -144,6 +147,8 @@ export interface AuthorizationRequest {
   id: string;
   /** 关联的异常事件（缺项/排队等），授权通过后据此解锁处置 */
   incidentId?: string;
+  /** 关联的空腹加项冲突 */
+  fastingAddonId?: string;
   title: string;
   detail: string;
   feeDelta: number;
@@ -151,6 +156,93 @@ export interface AuthorizationRequest {
   createdAt: string;
   decidedAt?: string;
   responder?: string;
+}
+
+/** 医生临时加开空腹抽血/胃镜：进食核查结果 */
+export interface FastingCheck {
+  eaten: boolean; // 是否已进食
+  lastMealTime?: string; // 末次进食时间 HH:mm
+  /** 距末次进食时长（小时，由陪诊员填写/选择） */
+  fastingHours?: number;
+  /** 患者基础病风险（糖尿病/低血糖史等，来自病历） */
+  riskNote: string;
+}
+
+/** 检查顺序调整后重算的票据/时间 */
+export interface RecomputedTicket {
+  stageKey: StageKey;
+  label: string;
+  /** 重算后的取号号段/票号 */
+  ticketNo: string;
+  /** 取号/预约时间 */
+  callTime: string;
+  /** 预计排队分钟 */
+  waitMinutes: number;
+  /** 该项目本次费用（用于缴费重算） */
+  fee: number;
+  note?: string;
+}
+
+export type FastingAddonStatus =
+  | 'checking' // 已发起，待陪诊员核查进食
+  | 'awaitingFamily' // 已出方案，待家属选择
+  | 'wait' // 继续等待（当日空腹完成）
+  | 'reschedule' // 改日检查
+  | 'othersFirst'; // 先完成其他项目
+
+/** 医生临时加开空腹项目（抽血/胃镜）冲突处置 */
+export interface FastingAddonConflict {
+  id: string;
+  examId: string; // 加开项目（可能是胃镜等扩展项）
+  examName: string;
+  kind: 'blood' | 'gastroscopy';
+  raisedAt: string;
+  check?: FastingCheck; // 进食核查
+  status: FastingAddonStatus;
+  /** 三个方案的家属可见说明 */
+  planWait: string;
+  planReschedule: string;
+  planOthersFirst: string;
+  /** 进食核查后生成的三个重算方案（持久化，家属端可见） */
+  plans?: AddonPlanView[];
+  chosenPlan?: 'wait' | 'reschedule' | 'othersFirst';
+  decidedBy?: string;
+  decidedAt?: string;
+  /** 顺序调整后重算的缴费/取号/回诊 */
+  recomputed?: RecomputedSchedule;
+  /** 回诊是否受影响，需要先联系医生助理确认 */
+  revisitImpacted: boolean;
+  assistantConfirmed: boolean;
+  assistantNote?: string;
+  /** 改约的可选时间 */
+  rescheduleOptions: string[];
+  rescheduleDate?: string;
+}
+
+/** 缴费 / 取号 / 回诊 重算结果 */
+export interface RecomputedSchedule {
+  /** 需要新增/补缴的费用明细 */
+  extraFees: { label: string; amount: number }[];
+  extraFeeTotal: number;
+  /** 重算后各环节取号票 */
+  tickets: RecomputedTicket[];
+  /** 重算后的回诊时间；null 表示当日无回诊/不受影响 */
+  revisitTime?: string;
+  /** 原回诊时间 */
+  originalRevisitTime?: string;
+  note: string;
+}
+
+/** 空腹加项三方案视图（持久化，供家属端查看） */
+export interface AddonPlanView {
+  key: 'wait' | 'reschedule' | 'othersFirst';
+  feasible: boolean;
+  title: string;
+  text: string;
+  feeDelta: number;
+  schedule: RecomputedSchedule;
+  revisitImpacted: boolean;
+  rescheduleDate?: string;
 }
 
 /** 预约表单（患者/家属提交） */
@@ -234,6 +326,8 @@ export interface EscortOrder {
   crossCampus?: CrossCampusTrip;
   handover?: ShiftHandover;
   authorizations: AuthorizationRequest[];
+  /** 医生临时加开的空腹项目冲突处置（可能多个） */
+  fastingAddons: FastingAddonConflict[];
   emotionNote?: string; // 情绪安抚记录
   archive?: ServiceArchive;
 }
@@ -260,7 +354,7 @@ export interface ExamDef {
   fee: number;
   campusId: string;
   queueMinutes: number;
-  category: '抽血' | '影像' | '功能' | '标本';
+  category: '抽血' | '影像' | '功能' | '标本' | '内镜';
 }
 
 export interface Campus {

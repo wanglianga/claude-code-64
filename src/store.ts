@@ -6,6 +6,7 @@ import type {
   ChatMessage,
   CrossCampusTrip,
   EscortOrder,
+  FastingCheck,
   FeeItem,
   Incident,
   IncidentType,
@@ -13,8 +14,8 @@ import type {
   ServiceArchive,
   StageKey,
 } from './types';
-import { CAMPUSES, ESCORTS } from './data';
-import { buildOrderSkeleton, nowISO, reportReadyText, todayStr, uid } from './plan';
+import { ADDON_EXAMS, CAMPUSES, ESCORTS } from './data';
+import { buildAddonPlans, createFastingAddon, buildOrderSkeleton, nowISO, reportReadyText, todayStr, uid } from './plan';
 
 // ============ 异常处置模板：当前状态 → 下一步选项 → 费用变化 → 是否需家属授权 ============
 export interface IncidentTemplate {
@@ -180,8 +181,8 @@ interface AppState {
   acceptOrder: (orderId: string, escortId: string) => void;
   patientArrive: (orderId: string, registrationTime: string) => void;
 
-  // 阶段推进
-  advanceStage: (orderId: string) => void;
+  // 阶段推进；返回非空字符串表示被规则拦截（如回诊需先经医生助理确认）
+  advanceStage: (orderId: string) => string | null;
   setStageWait: (orderId: string, stageKey: StageKey, minutes: number) => void;
   addStageNote: (orderId: string, stageKey: StageKey, note: string) => void;
 
@@ -216,6 +217,12 @@ interface AppState {
   // 检查单缺项
   markExamMissing: (orderId: string, examItemId: string, note: string) => void;
   clearExamMissing: (orderId: string, examItemId: string) => void;
+
+  // 医生临时加开空腹项目（抽血/胃镜）
+  raiseFastingAddon: (orderId: string, examId: string) => void;
+  submitFastingCheck: (orderId: string, addonId: string, check: FastingCheck) => void;
+  familyChooseAddonPlan: (orderId: string, addonId: string, planKey: 'wait' | 'reschedule' | 'othersFirst', responder: string) => void;
+  confirmAddonAssistant: (orderId: string, addonId: string, note: string) => void;
 
   // 档案 / 完成
   archiveOrder: (orderId: string, archive: ServiceArchive) => void;
@@ -461,15 +468,33 @@ export const useStore = create<AppState>()(
       },
 
       advanceStage: (orderId) => {
+        let blocked: string | null = null;
         set((s) => ({
           orders: s.orders.map((o) => {
             if (o.id !== orderId || o.status !== 'ongoing') return o;
             const stages = o.stages.map((st) => ({ ...st }));
             const idx = stages.findIndex((st) => st.status === 'active');
             if (idx === -1) return o;
+            // 空腹加项选了「改日检查」：当日回诊因加项报告未出，自动顺延跳过
+            const deferredAddon = o.fastingAddons.find((a) => a.status === 'reschedule');
+            // 下一个可进入环节
+            const rawNext = stages.findIndex((st, i) => i > idx && st.status !== 'skipped');
+            let nextIdx = rawNext;
+            if (nextIdx !== -1 && stages[nextIdx].key === 'revisit' && deferredAddon) {
+              stages[nextIdx].status = 'skipped';
+              stages[nextIdx].note = `空腹加项（${deferredAddon.examName}）改约${deferredAddon.rescheduleDate ?? ''}，当日回诊顺延至报告出具后`;
+              const after = stages.findIndex((st, i) => i > nextIdx && st.status !== 'skipped');
+              nextIdx = after;
+            }
+            // 进入回诊前：若任一已选方案影响回诊且未经医生助理确认 → 拦截
+            const impactedPending = o.fastingAddons.filter((a) => a.revisitImpacted && a.recomputed && !a.assistantConfirmed
+              && (a.status === 'wait' || a.status === 'othersFirst'));
+            if (nextIdx !== -1 && stages[nextIdx].key === 'revisit' && impactedPending.length > 0) {
+              blocked = `回诊时间因空腹加项顺序调整而改变（${impactedPending.map((a) => a.recomputed!.revisitTime).join('、')}），请先在「空腹加项」中联系医生助理确认后，再进入回诊环节。`;
+              return o;
+            }
             stages[idx].status = 'done';
             stages[idx].completedAt = nowISO();
-            const nextIdx = stages.findIndex((st, i) => i > idx && st.status !== 'skipped');
             if (nextIdx !== -1) {
               stages[nextIdx].status = 'active';
               stages[nextIdx].startedAt = nowISO();
@@ -478,6 +503,7 @@ export const useStore = create<AppState>()(
             return { ...o, stages, activeStageIndex: nextIdx === -1 ? stages.length - 1 : nextIdx, messages };
           }),
         }));
+        return blocked;
       },
 
       setStageWait: (orderId, stageKey, minutes) => {
@@ -723,6 +749,137 @@ export const useStore = create<AppState>()(
               ...o,
               exams: o.exams.map((x) => x.id === examItemId ? { ...x, missing: false, note: '医生已补单并完成缴费' } : x),
               messages: [...o.messages, orderMsg(`检查单缺项已闭环：${item?.name} 已由医生补开、补缴完成，可正常检查。`, 'status')],
+            };
+          }),
+        }));
+      },
+
+      // —— 医生临时加开空腹抽血 / 胃镜 ——
+      raiseFastingAddon: (orderId, examId) => {
+        const conflict = createFastingAddon(examId);
+        const def = ADDON_EXAMS.find((x) => x.id === examId)!;
+        set((s) => ({
+          orders: s.orders.map((o) => {
+            if (o.id !== orderId) return o;
+            // 同一加项未闭环时不重复发起
+            if (o.fastingAddons.some((a) => a.examId === examId && ['checking', 'awaitingFamily'].includes(a.status))) return o;
+            const exams = [...o.exams, { id: uid('exam'), examId, name: def.name, ordered: true, note: '医生临时加开（空腹）' }];
+            return {
+              ...o,
+              fastingAddons: [conflict, ...o.fastingAddons],
+              exams,
+              messages: [...o.messages, orderMsg(`🍚 医生临时加开【${def.name}】（要求禁食 ${def.fastingHoursRequired} 小时）。陪诊员需立即核查患者是否已进食、当日检查顺序与可改约时间，并向家属同步方案。`, 'auth')],
+            };
+          }),
+        }));
+      },
+
+      submitFastingCheck: (orderId, addonId, check) => {
+        set((s) => ({
+          orders: s.orders.map((o) => {
+            if (o.id !== orderId) return o;
+            const addon = o.fastingAddons.find((a) => a.id === addonId);
+            if (!addon) return o;
+            const plans = buildAddonPlans(o, addonId, check);
+            const def = ADDON_EXAMS.find((x) => x.id === addon.examId)!;
+            const anyImpacted = plans.some((p) => p.feasible && p.revisitImpacted);
+            const eating = check.eaten
+              ? `患者已于 ${check.lastMealTime ?? '近期'} 进食`
+              : `患者未进食，末次进食 ${check.lastMealTime ?? '—'}，已空腹 ${check.fastingHours ?? 0} 小时（要求 ${def.fastingHoursRequired} 小时）`;
+            const feasible = plans.filter((p) => p.feasible).map((p) => p.title).join('；');
+            return {
+              ...o,
+              fastingAddons: o.fastingAddons.map((a) => a.id === addonId
+                ? { ...a, check, plans, status: 'awaitingFamily' as const, revisitImpacted: anyImpacted, planWait: plans[0]?.text ?? '', planReschedule: plans[1]?.text ?? '', planOthersFirst: plans[2]?.text ?? '' }
+                : a),
+              messages: [...o.messages, orderMsg(`🍚 空腹加项核查完成：${eating}。${check.riskNote ? `风险：${check.riskNote}。` : ''}可行方案：${feasible}。请家属在「空腹加项处置」中选择；系统已对缴费、取号、回诊时间整体重算，避免后续排队失效。`, 'auth')],
+            };
+          }),
+        }));
+      },
+
+      familyChooseAddonPlan: (orderId, addonId, planKey, responder) => {
+        set((s) => ({
+          orders: s.orders.map((o) => {
+            if (o.id !== orderId) return o;
+            const addon = o.fastingAddons.find((a) => a.id === addonId);
+            if (!addon || !addon.plans) return o;
+            const plan = addon.plans.find((p) => p.key === planKey);
+            if (!plan || !plan.feasible) return o;
+            const now = new Date();
+            const todayMd = `${now.getMonth() + 1}月${now.getDate()}日`;
+            // 只把当日票写回环节；改约票留在方案卡片
+            let stages = o.stages.map((st) => {
+              const tk = plan.schedule.tickets.find((t) => t.stageKey === st.key && t.callTime.startsWith(todayMd));
+              return tk ? { ...st, ticketNo: tk.ticketNo, callTime: tk.callTime, waitMinutes: tk.waitMinutes, note: tk.note ?? st.note } : st;
+            });
+            let activeStageIndex = o.activeStageIndex;
+            // 改日检查：当日回诊因加项报告未出而顺延（无论回诊当前是待办还是已激活）
+            if (planKey === 'reschedule') {
+              const revIdx = stages.findIndex((st) => st.key === 'revisit');
+              if (revIdx !== -1 && stages[revIdx].status !== 'done' && stages[revIdx].status !== 'skipped') {
+                stages = stages.map((st) => st.key === 'revisit'
+                  ? {
+                    ...st,
+                    status: 'skipped' as const,
+                    note: `空腹加项（${addon.examName}）改约${plan.rescheduleDate ?? addon.rescheduleOptions[0]}，当日回诊顺延至报告出具后（重算：${plan.schedule.revisitTime}）`,
+                    ticketNo: undefined,
+                    callTime: plan.schedule.revisitTime,
+                  }
+                  : st);
+                if (activeStageIndex === revIdx) {
+                  const nextIdx = stages.findIndex((st, i) => i > revIdx && st.status !== 'skipped');
+                  if (nextIdx !== -1) {
+                    stages[nextIdx] = { ...stages[nextIdx], status: 'active' as const, startedAt: nowISO() };
+                    activeStageIndex = nextIdx;
+                  }
+                }
+              }
+            }
+            const fees = [...o.fees];
+            plan.schedule.extraFees.forEach((f) => {
+              fees.push({ id: uid('fee'), label: f.label, amount: f.amount, at: nowISO(), category: f.label.includes('陪诊') ? 'escort' : 'exam' });
+            });
+            const statusMap = { wait: 'wait' as const, reschedule: 'reschedule' as const, othersFirst: 'othersFirst' as const };
+            const chosenTitle = { wait: '继续等待·今日空腹优先', reschedule: '改日检查', othersFirst: '先完成其他项目' }[planKey];
+            const resolvedRescheduleDate = planKey === 'reschedule'
+              ? (plan.rescheduleDate ?? addon.rescheduleOptions[0])
+              : planKey === 'othersFirst' ? (plan.rescheduleDate ?? addon.rescheduleDate) : undefined;
+            return {
+              ...o,
+              stages,
+              activeStageIndex,
+              fees,
+              fastingAddons: o.fastingAddons.map((a) => a.id === addonId
+                ? { ...a, chosenPlan: planKey, decidedBy: responder, decidedAt: now.toISOString(), status: statusMap[planKey], recomputed: plan.schedule, rescheduleDate: resolvedRescheduleDate }
+                : a),
+              messages: [
+                ...o.messages,
+                orderMsg(`🍚 家属${responder}已选择方案【${chosenTitle}】。缴费/取号/回诊已按新顺序整体重算：${plan.schedule.note}`, 'auth'),
+                ...(plan.feeDelta > 0 ? [orderMsg(`【费用同步】空腹加项方案新增费用合计 ${plan.feeDelta} 元，已计入费用清单。`, 'fee')] : []),
+                ...(planKey === 'reschedule'
+                  ? [orderMsg(`当日回诊已自动顺延至 ${plan.schedule.revisitTime}（改约 ${resolvedRescheduleDate}），改约前一日陪诊员电话提醒禁食。`, 'status')]
+                  : plan.revisitImpacted
+                    ? [orderMsg(`⚠ 回诊时间受到影响（${plan.schedule.originalRevisitTime} → ${plan.schedule.revisitTime}）。系统已锁定「进入回诊」：陪诊员必须先联系医生助理确认新回诊时段，家属与患者方可前往诊室。`, 'auth')]
+                    : [orderMsg(`回诊时间 ${plan.schedule.revisitTime} 与原计划一致，无需医生助理改约。`, 'status')]),
+              ],
+            };
+          }),
+        }));
+      },
+
+      confirmAddonAssistant: (orderId, addonId, note) => {
+        set((s) => ({
+          orders: s.orders.map((o) => {
+            if (o.id !== orderId) return o;
+            const addon = o.fastingAddons.find((a) => a.id === addonId);
+            if (!addon || !addon.recomputed) return o;
+            return {
+              ...o,
+              fastingAddons: o.fastingAddons.map((a) => a.id === addonId
+                ? { ...a, assistantConfirmed: true, assistantNote: note }
+                : a),
+              messages: [...o.messages, orderMsg(`✅ 陪诊员已联系医生助理确认：新回诊时间 ${addon.recomputed.revisitTime}（${note || '号源已锁定'}）。回诊环节解锁，可按重算后的取号票继续执行。`, 'auth')],
             };
           }),
         }));

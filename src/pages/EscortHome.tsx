@@ -13,6 +13,7 @@ export default function EscortHome({ escortId, onOpen }: { escortId: string; onO
   const accepted = mine.filter((o) => o.status === 'accepted');
   const done = mine.filter((o) => o.status === 'completed');
   const pendingAuth = orders.filter((o) => o.escortId === escortId && o.authorizations.some((a) => a.status === 'pending')).length;
+  const pendingFasting = orders.filter((o) => o.escortId === escortId && (o.fastingAddons ?? []).some((a) => a.status === 'awaitingFamily' || a.status === 'checking')).length;
 
   return (
     <div>
@@ -24,6 +25,9 @@ export default function EscortHome({ escortId, onOpen }: { escortId: string; onO
 
       {pendingAuth > 0 && (
         <div className="callout danger">有 {pendingAuth} 个异常处置方案正等待家属远程授权，请进入订单查看并可电话提醒家属。</div>
+      )}
+      {pendingFasting > 0 && (
+        <div className="callout warn">有 {pendingFasting} 个「医生临时加开空腹项目」正待核查进食或待家属选择方案（继续等待 / 改日检查 / 先做其他项目）。</div>
       )}
 
       {/* 抢单池 */}
@@ -75,6 +79,8 @@ export default function EscortHome({ escortId, onOpen }: { escortId: string; onO
                 <b style={{ fontSize: 15 }}>{d.name} · {o.form.patientName}</b>
                 <div style={{ display: 'flex', gap: 6 }}>
                   {waitAuth && <span className="badge red">待授权</span>}
+                  {(o.fastingAddons ?? []).some((a) => a.status === 'awaitingFamily') && <span className="badge orange">空腹方案待家属选</span>}
+                  {(o.fastingAddons ?? []).some((a) => a.status === 'checking') && <span className="badge orange">待核查进食</span>}
                   {o.status === 'ongoing' && <span className="badge teal"><span className="pulse" style={{ marginRight: 5 }} />{active?.label}</span>}
                   <StatusBadge status={o.status} />
                 </div>

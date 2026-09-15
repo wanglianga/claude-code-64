@@ -1,11 +1,15 @@
-import { DEPARTMENTS, EXAMS, CAMPUSES } from './data';
+import { ADDON_EXAMS, DEPARTMENTS, EXAMS, CAMPUSES } from './data';
 import type {
+  AddonPlanView,
   BookingForm,
   CrossCampusTrip,
   EscortOrder,
   ExamOrderItem,
+  FastingAddonConflict,
+  FastingCheck,
   FeeItem,
   MaterialItem,
+  RecomputedSchedule,
   StageState,
   TimeSlotAdvice,
 } from './types';
@@ -15,7 +19,6 @@ export function uid(prefix = 'id'): string {
   seq += 1;
   return `${prefix}-${Date.now().toString(36)}-${seq}-${Math.floor(Math.random() * 1e4).toString(36)}`;
 }
-
 export function nowISO(): string {
   return new Date().toISOString();
 }
@@ -280,6 +283,7 @@ export function buildOrderSkeleton(form: BookingForm, id: string, code: string):
     messages: [],
     exams: buildExamItems(form),
     authorizations: [],
+    fastingAddons: [],
   };
 }
 
@@ -319,4 +323,210 @@ export function buildCrossCampus(targetCampusId: string, examNames: string[], tr
     departTime: `${depart.getMonth() + 1}月${depart.getDate()}日 ${f(depart)}`,
     expectedReturnTime: `${back.getMonth() + 1}月${back.getDate()}日 ${f(back)}`,
   };
+}
+
+// ============ 医生临时加开空腹项目：冲突核查 + 缴费/取号/回诊重算 ============
+
+const WEEK = ['日', '一', '二', '三', '四', '五', '六'];
+
+function hhmm(d: Date): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function md(d: Date): string {
+  return `${d.getMonth() + 1}月${d.getDate()}日`;
+}
+function atTime(base: Date, addMin: number): Date {
+  return new Date(base.getTime() + addMin * 60_000);
+}
+function round5(d: Date): Date {
+  return new Date(Math.ceil(d.getTime() / 300_000) * 300_000);
+}
+
+/** 可改约时间：明日/第 3 日/第 7 日上午 08:00（避开周日内镜中心停诊） */
+export function rescheduleOptions(now = new Date()): string[] {
+  const out: string[] = [];
+  [1, 3, 7].forEach((day) => {
+    const d = new Date(now);
+    d.setDate(d.getDate() + day);
+    d.setHours(8, 0, 0, 0);
+    if (d.getDay() === 0) d.setDate(d.getDate() + 1);
+    out.push(`${md(d)}（周${WEEK[d.getDay()]}）08:00 空腹时段`);
+  });
+  return out;
+}
+
+/** 依据挂号时间与各环节等待，估算原计划回诊时间 */
+export function estimateOriginalRevisit(order: EscortOrder, now = new Date()): Date {
+  const [h, m] = (order.registrationTime || order.advice.registerTime).split(':').map(Number);
+  const base = new Date(now);
+  base.setHours(h || 8, m || 0, 0, 0);
+  const before = order.stages.filter((s) => ['signin', 'wait', 'consult', 'pay', 'blood', 'image'].includes(s.key) && s.status !== 'skipped');
+  const mins = before.reduce((sum, s) => sum + (s.waitMinutes ?? 10), 0);
+  return atTime(base, mins + 20);
+}
+
+/** 发起一条空腹加项冲突（陪诊员在医生开单后发起） */
+export function createFastingAddon(examId: string, now = new Date()): FastingAddonConflict {
+  const def = ADDON_EXAMS.find((x) => x.id === examId)!;
+  return {
+    id: uid('fa'),
+    examId,
+    examName: def.name,
+    kind: def.kind,
+    raisedAt: now.toISOString(),
+    status: 'checking',
+    planWait: '',
+    planReschedule: '',
+    planOthersFirst: '',
+    revisitImpacted: false,
+    assistantConfirmed: false,
+    rescheduleOptions: rescheduleOptions(now),
+  };
+}
+
+function makeTicket(stageKey: StageState['key'], label: string, t: Date, waitMinutes: number, fee: number, note?: string) {
+  return { stageKey, label, ticketNo: '', callTime: `${md(t)} ${hhmm(t)}`, waitMinutes, fee, note };
+}
+
+/**
+ * 根据进食核查结果，生成三个方案及其重算后的缴费/取号/回诊。
+ * 关键：任何方案都整体重算后续 pay/blood/image/revisit 的时间，避免只改一项导致排队失效。
+ */
+export function buildAddonPlans(order: EscortOrder, addonId: string, check: FastingCheck, now = new Date()): AddonPlanView[] {
+  const addon = order.fastingAddons.find((a) => a.id === addonId)!;
+  const def = ADDON_EXAMS.find((x) => x.id === addon.examId)!;
+  const start = round5(now);
+  const originalRevisit = estimateOriginalRevisit(order, now);
+
+  // 空腹合规窗口：末次进食 + 要求小时数
+  let fastingReady: Date | null = null;
+  if (!check.eaten && check.lastMealTime) {
+    const [h, m] = check.lastMealTime.split(':').map(Number);
+    const last = new Date(now);
+    last.setHours(h, m ?? 0, 0, 0);
+    if (last.getTime() > now.getTime()) last.setDate(last.getDate() - 1); // 昨夜进食
+    fastingReady = atTime(last, def.fastingHoursRequired);
+  }
+  const hours = check.fastingHours ?? 0;
+  const waitEligible = !check.eaten && hours >= def.fastingHoursRequired;
+
+  // 今日非空腹在途项目（顺序重排的对象）
+  const otherExams = EXAMS.filter((e) => order.form.examIds.includes(e.id) && !e.needFasting);
+  const otherMins = otherExams.reduce((s, e) => s + e.queueMinutes, 0);
+
+  const risk = check.riskNote ? `（病史风险：${check.riskNote}）` : '';
+
+  // —— 方案 A：继续等待，今日空腹优先完成 ——
+  const tPay = atTime(start, 5);
+  const tAddon = atTime(tPay, 12 + 10); // 缴费+到检查点
+  const tAddonDone = atTime(tAddon, def.queueMinutes + def.turnaroundMinutes);
+  const tRevisitWait = atTime(tAddonDone, otherMins + 20);
+  const waitImpacted = tRevisitWait.getTime() - originalRevisit.getTime() > 15 * 60_000 || tRevisitWait.getHours() >= 12;
+  const waitTickets = [
+    makeTicket('pay', '加项缴费（含原项目）', tPay, 12, def.fee, '窗口合并缴费，一次出单'),
+    makeTicket(def.kind === 'blood' ? 'blood' : 'image', def.kind === 'blood' ? '加抽空腹血' : '无痛胃镜', tAddon, def.queueMinutes, 0, `${def.location}`),
+    ...otherExams.slice(0, 2).map((e, i) => makeTicket(e.category === '抽血' ? 'blood' : 'image', e.short, atTime(tAddonDone, 5 + i * 25), e.queueMinutes, 0, '加项后顺延取号')),
+    makeTicket('revisit', '回诊看结果', tRevisitWait, 20, 0),
+  ];
+  waitTickets.forEach((t, i) => { t.ticketNo = `A-${String(i + 1).padStart(2, '0')}`; });
+  const waitSchedule: RecomputedSchedule = {
+    extraFees: [{ label: def.name, amount: def.fee }, ...(waitImpacted ? [{ label: '午间延时陪诊（回诊延后）', amount: 60 }] : [])],
+    extraFeeTotal: def.fee + (waitImpacted ? 60 : 0),
+    tickets: waitTickets,
+    revisitTime: `${md(tRevisitWait)} ${hhmm(tRevisitWait)}`,
+    originalRevisitTime: `${md(originalRevisit)} ${hhmm(originalRevisit)}`,
+    note: waitImpacted
+      ? `回诊由 ${hhmm(originalRevisit)} 推迟到 ${hhmm(tRevisitWait)}（跨午间），系统已标记：陪诊员须先联系医生助理确认新回诊时段`
+      : `回诊时间 ${hhmm(tRevisitWait)} 与原计划 ${hhmm(originalRevisit)} 基本一致，无需调整诊室预约`,
+  };
+
+  // —— 方案 B：改日检查（今日不做加项） ——
+  const rescheduleDate = addon.rescheduleOptions[0];
+  const mdPart = rescheduleDate.split('）')[0] + '）';
+  const timePart = rescheduleDate.split('）')[1]?.trim().match(/\d{2}:\d{2}/)?.[0] ?? '08:00';
+  const addonShort = def.kind === 'blood' ? '空腹血糖' : '无痛胃镜';
+  const revisitB = new Date(now);
+  revisitB.setDate(revisitB.getDate() + 1);
+  revisitB.setHours(15, 0, 0, 0);
+  if (revisitB.getDay() === 0) revisitB.setDate(revisitB.getDate() + 1);
+  const bTickets = [
+    makeTicket('pay', '今日原项目缴费（加项不约不取费）', tPay, 12, 0),
+    ...otherExams.slice(0, 2).map((e, i) => makeTicket(e.category === '抽血' ? 'blood' : 'image', e.short, atTime(tPay, 20 + i * 30), e.queueMinutes, 0)),
+    { stageKey: (def.kind === 'blood' ? 'blood' : 'image') as StageState['key'], label: `${addonShort}（改约）`, ticketNo: 'B-01', callTime: `${mdPart} ${timePart}`, waitMinutes: def.queueMinutes, fee: def.fee, note: '重新禁食 8 小时，陪诊员前一日 20:00 电话提醒' },
+    makeTicket('revisit', '回诊（看加项结果）', revisitB, 20, 0, '改约日下午回诊'),
+  ];
+  const bImpacted = true; // 回诊必然改到改约日后
+  const bSchedule: RecomputedSchedule = {
+    extraFees: [],
+    extraFeeTotal: 0,
+    tickets: bTickets,
+    revisitTime: `${md(revisitB)} 15:00`,
+    originalRevisitTime: `${md(originalRevisit)} ${hhmm(originalRevisit)}`,
+    note: `今日不加收加项费用；回诊改至 ${md(revisitB)} 15:00（加项报告出具后），须医生助理确认该时段号源`,
+  };
+
+  // —— 方案 C：今日先完成其他非空腹项目，空腹项排最近可行时段 ——
+  const tPayC = atTime(start, 5);
+  const tOther0 = atTime(tPayC, 20);
+  const tOtherDone = atTime(tOther0, otherMins + 20);
+  // 空腹项安排：若现在仍满足空腹条件且上午能排上 → 今日其他项目后；否则次日晨
+  const sameDayPossible = waitEligible && fastingReady !== null && tOtherDone.getHours() < 10 && atTime(tOtherDone, def.queueMinutes).getHours() < 11;
+  const addonDate = sameDayPossible ? tOtherDone : (() => { const d = new Date(now); d.setDate(d.getDate() + 1); d.setHours(8, 0, 0, 0); if (d.getDay() === 0) d.setDate(d.getDate() + 1); return d; })();
+  const tRevisitC = sameDayPossible
+    ? atTime(addonDate, def.queueMinutes + def.turnaroundMinutes + 20)
+    : (() => { const d = new Date(addonDate); d.setHours(10, 30, 0, 0); return d; })();
+  const cImpacted = tRevisitC.getTime() - originalRevisit.getTime() > 15 * 60_000 || !sameDayPossible;
+  const cTickets = [
+    makeTicket('pay', '合并缴费', tPayC, 12, def.fee),
+    ...otherExams.slice(0, 2).map((e, i) => makeTicket(e.category === '抽血' ? 'blood' : 'image', e.short, atTime(tOther0, i * 30), e.queueMinutes, 0, '优先取号先做')),
+    { stageKey: def.kind === 'blood' ? 'blood' : 'image' as StageState['key'], label: def.kind === 'blood' ? '加抽空腹血' : '无痛胃镜', ticketNo: 'C-03', callTime: sameDayPossible ? `${md(addonDate)} ${hhmm(addonDate)}` : `${md(addonDate)} 08:00`, waitMinutes: def.queueMinutes, fee: 0, note: sameDayPossible ? '其他项目后立即空腹完成' : '次日空腹专场，今日先进食' },
+    makeTicket('revisit', '回诊看结果', tRevisitC, 20, 0),
+  ];
+  cTickets.forEach((t, i) => { if (!t.ticketNo) t.ticketNo = `C-${String(i + 1).padStart(2, '0')}`; });
+  const cSchedule: RecomputedSchedule = {
+    extraFees: [{ label: def.name, amount: def.fee }, ...(!sameDayPossible ? [{ label: '次日半天陪诊（改约晨间陪同）', amount: 120 }] : [])],
+    extraFeeTotal: def.fee + (!sameDayPossible ? 120 : 0),
+    tickets: cTickets,
+    revisitTime: `${md(tRevisitC)} ${hhmm(tRevisitC)}`,
+    originalRevisitTime: `${md(originalRevisit)} ${hhmm(originalRevisit)}`,
+    note: sameDayPossible
+      ? `非空腹项目先做，空腹项 ${hhmm(addonDate)} 接上，回诊 ${hhmm(tRevisitC)}`
+      : `今日空腹窗口已不足，非空腹项目先做完并让患者进食；空腹项改次日 08:00，回诊改次日 10:30，须医生助理确认号源`,
+  };
+
+  return [
+    {
+      key: 'wait',
+      feasible: waitEligible,
+      title: '继续等待 · 今日空腹优先',
+      text: waitEligible
+        ? `患者${check.lastMealTime ? `末次进食 ${check.lastMealTime}，` : ''}已空腹 ${hours} 小时，满足 ${def.fastingHoursRequired} 小时要求。缴费后优先赴${def.location}，约 ${hhmm(tAddon)} 可做、${hhmm(tAddonDone)} 前完成；陪诊员全程备糖、每 15 分钟观察低血糖表现${risk}。`
+        : `❌ 不可行：患者${check.eaten ? `已于 ${check.lastMealTime} 进食` : `空腹仅 ${hours} 小时`}，未达 ${def.fastingHoursRequired} 小时空腹要求，强行检查结果失真且麻醉（胃镜）有反流误吸风险。`,
+      feeDelta: waitSchedule.extraFeeTotal,
+      schedule: waitSchedule,
+      revisitImpacted: waitImpacted,
+    },
+    {
+      key: 'reschedule',
+      feasible: true,
+      title: '改日检查',
+      text: `今日不做${addonShort}、不缴该项费用；可改约：${addon.rescheduleOptions.join(' / ')}。改约当日重新禁食 8 小时，陪诊员前一日 20:00 电话提醒，今日已开其他项目照常完成。`,
+      feeDelta: 0,
+      schedule: bSchedule,
+      revisitImpacted: bImpacted,
+      rescheduleDate,
+    },
+    {
+      key: 'othersFirst',
+      feasible: true,
+      title: '先完成其他项目 · 空腹项排最近可行时段',
+      text: sameDayPossible
+        ? `先取号完成 ${otherExams.map((e) => e.short).join('、') || '当日其他检查'}，${hhmm(addonDate)} 接续完成空腹项，无需再来院。`
+        : `上午空腹时间已不足，今日先完成 ${otherExams.map((e) => e.short).join('、') || '其他非空腹项目'} 并让患者正常进食；空腹项改次日 08:00 专场，加收次日半天陪诊 120 元。`,
+      feeDelta: cSchedule.extraFeeTotal,
+      schedule: cSchedule,
+      revisitImpacted: cImpacted,
+      rescheduleDate: sameDayPossible ? undefined : addon.rescheduleOptions[0],
+    },
+  ];
 }

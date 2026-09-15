@@ -74,6 +74,8 @@ export default function DeskHome(_: { onOpen: (id: string) => void }) {
                 {o.status === 'ongoing' && <>当前环节：<b>{o.stages[o.activeStageIndex]?.label}</b>（{o.stages[o.activeStageIndex]?.location}）　</>}
                 待授权 {o.authorizations.filter((a) => a.status === 'pending').length}
                 未闭环异常 {o.incidents.filter((i) => i.status === 'open').length}
+                {(o.fastingAddons ?? []).some((a) => a.status === 'awaitingFamily') && <span className="badge orange" style={{ marginLeft: 6 }}>空腹加项待家属选方案</span>}
+                {(o.fastingAddons ?? []).some((a) => ['wait', 'othersFirst'].includes(a.status) && a.revisitImpacted && !a.assistantConfirmed) && <span className="badge red" style={{ marginLeft: 6 }}>回诊待医生助理确认</span>}
                 {o.crossCampus && <>　<span className="badge blue">跨院区 · {({ planned: '已规划', enroute: '前往中', checking: '检查中', returned: '已返院' })[o.crossCampus.status]}</span></>}
                 {o.handover && <span className="badge orange" style={{ marginLeft: 6 }}>已换班{!o.handover.acknowledgedByFamily && '·待家属确认'}</span>}
               </div>

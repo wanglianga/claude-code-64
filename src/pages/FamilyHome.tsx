@@ -223,7 +223,10 @@ export default function FamilyHome({ onOpen }: { onOpen: (id: string) => void })
             <button key={o.id} className="order-card" onClick={() => onOpen(o.id)}>
               <div className="top">
                 <b style={{ fontSize: 15 }}>{d.name} · {o.form.patientName}（{o.form.patientAge} 岁{o.form.patientGender}）</b>
-                <StatusBadge status={o.status} />
+                <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  {(o.fastingAddons ?? []).some((a) => a.status === 'awaitingFamily') && <span className="badge red">🍚 空腹加项待您选方案</span>}
+                  <StatusBadge status={o.status} />
+                </span>
               </div>
               <div className="body">
                 <span><b>单号：</b><span className="code">{o.code}</span></span>
