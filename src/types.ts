@@ -250,7 +250,34 @@ export interface RecomputedSchedule {
 
 // ============ 轮椅 / 平车 院内转运协同 ============
 export type TransferMode = 'wheelchair' | 'stretcher' | 'walkAssist';
-export type TransferStatus = 'planned' | 'volunteerRequested' | 'elevatorBooked' | 'enroute' | 'arrived' | 'cancelled';
+export type TransferStatus =
+  | 'planned' // 轮椅等无需医梯确认，方案就绪
+  | 'elevatorPending' // 卧位平车：医梯需求待确认（尚不能开始转运）
+  | 'elevatorConfirmed' // 医梯已由服务台/志愿台确认
+  | 'volunteerRequested'
+  | 'enroute'
+  | 'arrived'
+  | 'cancelled';
+
+/** 医梯资源：需求与确认分离，未确认不得视为已落实 */
+export interface ElevatorResource {
+  required: boolean;
+  /** 'needed' 仅生成需求；'confirmed' 已由服务台确认；'released' 确认后被取消回退 */
+  state: 'needed' | 'confirmed' | 'released';
+  /** 方案建议的电梯（院区/名称/位置） */
+  elevatorName: string;
+  elevatorLocation: string;
+  /** 建议预约时段 */
+  recommendedSlot: string;
+  // —— 确认后才写入 ——
+  confirmedSlot?: string;
+  /** 确认来源：总院志愿服务台 8001 / 东院志愿服务台 8101 */
+  confirmedSource?: string;
+  confirmedBy?: string; // 确认人姓名/工号
+  confirmedAt?: string;
+  /** 取消/回退原因 */
+  releasedReason?: string;
+}
 
 /** 一段院内转运：门诊楼 ↔ 影像楼等 */
 export interface TransferSegment {
@@ -287,12 +314,16 @@ export interface WheelchairTransfer {
   familyAccompanying: boolean; // 家属是否随行
 
   // 资源与费用
-  deposit: number; // 轮椅/平车押金
+  deposit: number; // 轮椅/平车押金（展示为可退，不计入应缴）
   rentalFee: number; // 租借费
   transportFee: number; // 平车转运/志愿者服务费
   volunteerRequested: boolean;
-  elevatorReservation: boolean; // 是否预约医梯
-  elevatorReservationTime?: string;
+  /** 医梯资源（需求待确认 / 已确认 / 已回退） */
+  elevator: ElevatorResource;
+  /** 费用是否已生效入账：卧位需医梯确认后才为 true；取消时红冲 */
+  feeCommitted: boolean;
+  /** 已入账费用的 fee id（用于取消时红冲回退） */
+  committedFeeIds: string[];
   segments: TransferSegment[];
 
   note: string;

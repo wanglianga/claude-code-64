@@ -1,4 +1,5 @@
 import type {
+  ElevatorResource,
   TransferMode,
   TransferSegment,
   WheelchairTransfer,
@@ -233,6 +234,9 @@ export interface TransferInput {
  * 构建完整转运方案。
  * 起终点非同院区或路线库缺失时抛 TransferRouteNotConfiguredError，
  * 调用方必须捕获并阻止创建（不得写入转运记录/家属提示/押金/费用）。
+ *
+ * 卧位平车需要医梯资源：生成方案时只记录「待确认需求」（院区/电梯/建议时段），
+ * 不写确认结果、费用不生效、不可开始转运；待服务台/志愿台确认后才落实。
  */
 export function buildTransfer(input: TransferInput): WheelchairTransfer {
   // 卧位强制平车
@@ -248,7 +252,7 @@ export function buildTransfer(input: TransferInput): WheelchairTransfer {
   const notes: string[] = [];
   let congestionAction: WheelchairTransfer['congestionAction'] = null;
   if (input.needSupine && mode === 'stretcher') {
-    notes.push('患者需卧位：已切换为医用平车，须预约可容平车的医用电梯与检查位；');
+    notes.push('患者需卧位：已切换为医用平车，需预约可容平车的医用电梯与检查位（医梯资源待服务台/志愿台确认，确认前不可开始转运）；');
   }
   if (!input.canUseToiletIndependently) {
     notes.push('患者无法独立如厕：转运前先陪同如厕/穿戴护理垫，平车配便孔位，检查楼一层有无障碍卫生间；');
@@ -267,6 +271,28 @@ export function buildTransfer(input: TransferInput): WheelchairTransfer {
   const modeName = mode === 'wheelchair' ? '轮椅' : mode === 'stretcher' ? '医用平车' : '搀扶步行';
   const campusName = LOCATIONS[input.from].campusName;
 
+  // 卧位平车：医梯为「待确认需求」。建议使用路线段中的第一部医梯
+  const needsElevator = mode === 'stretcher';
+  const recommendedElevator = seg.elevators[0];
+  const elevator: ElevatorResource = needsElevator
+    ? {
+        required: true,
+        state: 'needed',
+        elevatorName: recommendedElevator?.name ?? '医用电梯',
+        elevatorLocation: recommendedElevator?.location ?? '',
+        recommendedSlot: '建议提前 15 分钟预约（按当前排队约 ' + seg.estimatedMinutes + ' 分钟）',
+      }
+    : {
+        required: false,
+        state: 'released',
+        elevatorName: '',
+        elevatorLocation: '',
+        recommendedSlot: '',
+      };
+
+  // 卧位医梯未确认前，平车费用不生效；轮椅无此限制
+  const feeCommitted = !needsElevator;
+
   return {
     id: uid('tr'),
     campusId,
@@ -274,7 +300,8 @@ export function buildTransfer(input: TransferInput): WheelchairTransfer {
     fromLocation: seg.fromLocation,
     toLocation: seg.toLocation,
     mode,
-    status: 'planned',
+    // 卧位：elevatorPending；轮椅/搀扶：planned
+    status: needsElevator ? 'elevatorPending' : 'planned',
     createdAt: nowISO(),
     needSupine: input.needSupine,
     canUseToiletIndependently: input.canUseToiletIndependently,
@@ -283,8 +310,9 @@ export function buildTransfer(input: TransferInput): WheelchairTransfer {
     rentalFee,
     transportFee,
     volunteerRequested: false,
-    elevatorReservation: mode === 'stretcher',
-    elevatorReservationTime: mode === 'stretcher' ? '建议提前 15 分钟预约' : undefined,
+    elevator,
+    feeCommitted,
+    committedFeeIds: [],
     segments: [seg],
     note: `【${campusName} · ${modeName}转运 · ${input.purpose}】${seg.fromLocation} → ${seg.toLocation}，距离约 ${seg.distanceMeters} 米，陪诊员预计耗时 ${seg.estimatedMinutes} 分钟（含等电梯），志愿服务台 ${servicePhone}。` + notes.join(''),
     congestionAction,
@@ -292,3 +320,5 @@ export function buildTransfer(input: TransferInput): WheelchairTransfer {
 }
 
 export const transferFeeTotal = (t: WheelchairTransfer) => t.rentalFee + t.transportFee;
+export const transferFeeCommitted = (t: WheelchairTransfer) =>
+  t.feeCommitted ? transferFeeTotal(t) : 0;

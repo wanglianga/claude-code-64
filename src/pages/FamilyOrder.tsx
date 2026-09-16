@@ -104,11 +104,12 @@ export default function FamilyOrder({ orderId, onBack }: { orderId: string; onBa
           {order.transfers.map((t) => {
             const seg = t.segments[0];
             const modeName = t.mode === 'wheelchair' ? '轮椅' : t.mode === 'stretcher' ? '医用平车（卧位）' : '搀扶步行';
+            const transferStatusText = ({ planned: '已规划', elevatorPending: '医梯待确认', elevatorConfirmed: '医梯已确认', volunteerRequested: '已呼叫志愿者', enroute: '转运途中', arrived: '已到达检查点', cancelled: '已取消' } as const)[t.status];
             return (
               <div key={t.id} className="inc-card" style={{ borderLeft: '4px solid var(--primary)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                   <b>{t.purpose}</b>
-                  <span className="badge teal">{({ planned: '已规划', volunteerRequested: '已呼叫志愿者', elevatorBooked: '医梯已预约', enroute: '转运途中', arrived: '已到达检查点', cancelled: '已取消' })[t.status]}</span>
+                  <span className={`badge ${t.status === 'elevatorPending' ? 'red' : 'teal'}`}>{transferStatusText}</span>
                 </div>
                 <div className="small" style={{ margin: '5px 0' }}>
                   <span className="badge blue" style={{ marginRight: 6 }}>{t.campusId === 'east' ? '东院区' : '总院'}</span>
@@ -127,10 +128,27 @@ export default function FamilyOrder({ orderId, onBack }: { orderId: string; onBa
                   {seg.routeSteps.map((r, i) => <div key={i} className="route-step"><span className="idx">{i + 1}</span><span className="txt">{r}</span></div>)}
                   {seg.elevators.map((e, i) => <div key={i} className="callout info">🛗 {e.name}（{e.location}）：{e.note}</div>)}
                 </details>
+
+                {/* 医梯资源：待确认 / 已确认 / 已取消 三态明确告知家属 */}
+                {t.elevator.required && t.elevator.state === 'needed' && (
+                  <div className="callout danger" style={{ marginTop: 8 }}>
+                    🛗 卧位平车医梯<b>待服务台确认</b>（非已预约）：需求电梯 {t.elevator.elevatorName}（{t.elevator.elevatorLocation}），{t.elevator.recommendedSlot}。
+                    陪诊员正联系{t.campusId === 'east' ? '东院 8101' : '总院 8001'}，确认后才会开始转运；平车费用暂未入账。
+                    {t.elevator.releasedReason && <div className="small" style={{ marginTop: 4 }}>原预约已取消（{t.elevator.releasedReason}），正等待重新确认。</div>}
+                  </div>
+                )}
+                {t.elevator.required && t.elevator.state === 'confirmed' && (
+                  <div className="callout info" style={{ marginTop: 8 }}>
+                    🛗 医梯<b>已确认</b>：{t.elevator.elevatorName}，预约时段「{t.elevator.confirmedSlot}」，来源 {t.elevator.confirmedSource}，确认人 {t.elevator.confirmedBy}。将按此资源转运。
+                  </div>
+                )}
+
                 <div className="small" style={{ marginTop: 6 }}>
-                  押金 <b>{t.deposit} 元</b>（归还退回）；实缴 <b style={{ color: 'var(--danger)' }}>{t.rentalFee + t.transportFee} 元</b>
+                  押金 <b>{t.deposit} 元</b>（归还退回）；实缴{' '}
+                  {t.feeCommitted
+                    ? <b style={{ color: 'var(--danger)' }}>{t.rentalFee + t.transportFee} 元（已入账）</b>
+                    : <b style={{ color: 'var(--warn)' }}>{t.rentalFee + t.transportFee} 元（待医梯确认后入账）</b>}
                   {t.volunteerRequested && <span className="badge orange" style={{ marginLeft: 8 }}>已联系志愿服务台接应</span>}
-                  {t.elevatorReservation && <span className="badge blue" style={{ marginLeft: 8 }}>医梯已预约（{t.elevatorReservationTime}）</span>}
                 </div>
               </div>
             );

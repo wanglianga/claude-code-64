@@ -227,9 +227,12 @@ interface AppState {
 
   // 轮椅 / 平车院内转运协同
   createTransfer: (orderId: string, input: TransferInput) => string | null;
-  updateTransferStatus: (orderId: string, transferId: string, status: TransferStatus) => void;
+  updateTransferStatus: (orderId: string, transferId: string, status: TransferStatus) => string | null;
   requestTransferVolunteer: (orderId: string, transferId: string) => void;
-  reserveTransferElevator: (orderId: string, transferId: string, time: string) => void;
+  /** 服务台/志愿台确认卧位医梯（写入时段、来源、确认人），费用随之生效入账 */
+  confirmTransferElevator: (orderId: string, transferId: string, input: { slot: string; confirmedBy: string }) => void;
+  /** 取消医梯确认：回退为待确认，红冲已入账费用、同步家属；用于取消/路线调整 */
+  releaseTransferElevator: (orderId: string, transferId: string, reason: string) => void;
   reorderForTransferCongestion: (orderId: string, transferId: string) => void;
 
   // 档案 / 完成
@@ -919,23 +922,36 @@ export const useStore = create<AppState>()(
           }));
           return message;
         }
+        const campusLabel = t.campusId === 'east' ? '东院' : '总院';
         const servicePhone = t.campusId === 'east' ? '8101（东院志愿服务台）' : '8001（总院志愿服务台）';
         set((s) => ({
           orders: s.orders.map((o) => {
             if (o.id !== orderId) return o;
+            // 费用：轮椅（无需医梯确认）创建即生效；卧位平车待医梯确认后才入账
             const fees = [...o.fees];
-            if (t.rentalFee > 0) fees.push({ id: uid('fee'), label: `${t.mode === 'stretcher' ? '医用平车' : '轮椅'}租借费（${t.purpose}）`, amount: t.rentalFee, at: nowISO(), category: 'other' });
-            if (t.transportFee > 0) fees.push({ id: uid('fee'), label: `平车转运服务费（${t.purpose}）`, amount: t.transportFee, at: nowISO(), category: 'other' });
+            const committedFeeIds: string[] = [];
+            if (t.feeCommitted) {
+              if (t.rentalFee > 0) { const f = { id: uid('fee'), label: `${t.mode === 'stretcher' ? '医用平车' : '轮椅'}租借费（${t.purpose}）`, amount: t.rentalFee, at: nowISO(), category: 'other' as const }; fees.push(f); committedFeeIds.push(f.id); }
+              if (t.transportFee > 0) { const f = { id: uid('fee'), label: `平车转运服务费（${t.purpose}）`, amount: t.transportFee, at: nowISO(), category: 'other' as const }; fees.push(f); committedFeeIds.push(f.id); }
+            }
+            t.committedFeeIds = committedFeeIds;
             const feeMsgs: ChatMessage[] = [];
             if (t.deposit > 0) feeMsgs.push(orderMsg(`♿ 转运押金：${t.mode === 'stretcher' ? '平车' : '轮椅'}押金 ${t.deposit} 元（归还后原路退回，非消费，不计入应缴）。`, 'fee'));
-            if (transferFeeTotal(t) > 0) feeMsgs.push(orderMsg(`【费用同步】转运费用：${t.rentalFee ? `租借 ${t.rentalFee} 元` : ''}${t.transportFee ? `转运服务 ${t.transportFee} 元` : ''}，合计实缴 ${transferFeeTotal(t)} 元，已计入费用清单。`, 'fee'));
+            if (t.elevator.required && t.elevator.state === 'needed') {
+              feeMsgs.push(orderMsg(`🛗 卧位平车医梯资源待确认：已生成${campusLabel}医梯需求（${t.elevator.elevatorName}，${t.elevator.elevatorLocation}，${t.elevator.recommendedSlot}）。请联系${servicePhone}确认时段与检查位；**确认前医梯为待落实状态、平车租借/转运费暂不入账、不可开始转运**。`, 'auth'));
+            }
+            if (t.feeCommitted && transferFeeTotal(t) > 0) {
+              feeMsgs.push(orderMsg(`【费用同步】转运费用：${t.rentalFee ? `租借 ${t.rentalFee} 元` : ''}${t.transportFee ? `转运服务 ${t.transportFee} 元` : ''}，合计实缴 ${transferFeeTotal(t)} 元，已计入费用清单。`, 'fee'));
+            } else if (t.elevator.required) {
+              feeMsgs.push(orderMsg(`【费用预提示】平车租借 ${t.rentalFee} 元 + 转运服务 ${t.transportFee} 元待医梯确认后入账（未确认前不计入应缴）。`, 'fee'));
+            }
             return {
               ...o,
               transfers: [t, ...o.transfers],
               fees,
               messages: [
                 ...o.messages,
-                orderMsg(`♿ 已生成${t.campusId === 'east' ? '东院' : '总院'}转运方案【${t.purpose}】${t.fromLocation} → ${t.toLocation}（${t.mode === 'wheelchair' ? '轮椅' : t.mode === 'stretcher' ? '医用平车' : '搀扶步行'}），预计耗时 ${t.segments[0].estimatedMinutes} 分钟、距离 ${t.segments[0].distanceMeters} 米。${t.needSupine ? '卧位患者已自动切换平车并预约医梯；' : ''}${t.note}`, 'status'),
+                orderMsg(`♿ 已生成${campusLabel}转运方案【${t.purpose}】${t.fromLocation} → ${t.toLocation}（${t.mode === 'wheelchair' ? '轮椅' : t.mode === 'stretcher' ? '医用平车' : '搀扶步行'}），预计耗时 ${t.segments[0].estimatedMinutes} 分钟、距离 ${t.segments[0].distanceMeters} 米。${t.needSupine ? '卧位患者已自动切换平车，医梯资源待确认（非已预约）；' : ''}${t.note}`, 'status'),
                 ...feeMsgs,
                 ...(t.congestionAction === 'volunteer' ? [orderMsg(`⚠ 检测到该路线拥堵：建议提前联系${servicePhone}安排接应，或调整检查顺序错峰。`, 'auth')] : []),
               ],
@@ -946,11 +962,17 @@ export const useStore = create<AppState>()(
       },
 
       updateTransferStatus: (orderId, transferId, status) => {
+        // 卧位医梯未确认前，禁止进入转运途中
+        const cur = get().orders.find((o) => o.id === orderId)?.transfers.find((x) => x.id === transferId);
+        if (!cur) return '转运记录不存在';
+        if (status === 'enroute' && cur.elevator.required && cur.elevator.state !== 'confirmed') {
+          return `医梯资源尚未确认（${cur.elevator.elevatorName}），请先由 ${cur.campusId === 'east' ? '东院 8101' : '总院 8001'} 确认预约时段后再开始转运`;
+        }
         set((s) => ({
           orders: s.orders.map((o) => {
             if (o.id !== orderId) return o;
             const labelMap: Record<TransferStatus, string> = {
-              planned: '已规划', volunteerRequested: '已呼叫志愿者', elevatorBooked: '医梯已预约', enroute: '转运途中', arrived: '已到达检查点', cancelled: '已取消',
+              planned: '已规划', elevatorPending: '医梯待确认', elevatorConfirmed: '医梯已确认', volunteerRequested: '已呼叫志愿者', enroute: '转运途中', arrived: '已到达检查点', cancelled: '已取消',
             };
             return {
               ...o,
@@ -959,6 +981,7 @@ export const useStore = create<AppState>()(
             };
           }),
         }));
+        return null;
       },
 
       requestTransferVolunteer: (orderId, transferId) => {
@@ -972,21 +995,92 @@ export const useStore = create<AppState>()(
             const building = target.campusId === 'east' ? '东院医技楼' : '影像楼';
             return {
               ...o,
-              transfers: o.transfers.map((t) => t.id === transferId ? { ...t, volunteerRequested: true, status: t.status === 'planned' ? 'volunteerRequested' : t.status } : t),
-              messages: [...o.messages, orderMsg(`📞 已联系${phone}：请求志愿者在${building}端接应并协助医梯，预计 5 分钟到位；已同步家属。`, 'auth')],
+              transfers: o.transfers.map((t) => t.id === transferId ? { ...t, volunteerRequested: true, status: t.status === 'planned' || t.status === 'elevatorConfirmed' ? 'volunteerRequested' : t.status } : t),
+              messages: [...o.messages, orderMsg(`📞 已联系${phone}：请求志愿者在${building}端接应${target.elevator.required ? '并协助医梯' : ''}，预计 5 分钟到位；已同步家属。`, 'auth')],
             };
           }),
         }));
       },
 
-      reserveTransferElevator: (orderId, transferId, time) => {
+      // 服务台/志愿台确认卧位医梯：写入时段/来源/确认人，费用生效入账，状态变可转运
+      confirmTransferElevator: (orderId, transferId, input) => {
         set((s) => ({
           orders: s.orders.map((o) => {
             if (o.id !== orderId) return o;
+            const target = o.transfers.find((t) => t.id === transferId);
+            if (!target || !target.elevator.required) return o;
+            const source = target.campusId === 'east' ? '东院志愿服务台 8101' : '总院志愿服务台 8001';
+            const elevator = {
+              ...target.elevator,
+              state: 'confirmed' as const,
+              confirmedSlot: input.slot,
+              confirmedSource: source,
+              confirmedBy: input.confirmedBy,
+              confirmedAt: nowISO(),
+              releasedReason: undefined,
+            };
+            // 费用在确认时才入账
+            const fees = [...o.fees];
+            const ids: string[] = [];
+            if (target.rentalFee > 0) { const f = { id: uid('fee'), label: `医用平车租借费（${target.purpose}）`, amount: target.rentalFee, at: nowISO(), category: 'other' as const }; fees.push(f); ids.push(f.id); }
+            if (target.transportFee > 0) { const f = { id: uid('fee'), label: `平车转运服务费（${target.purpose}）`, amount: target.transportFee, at: nowISO(), category: 'other' as const }; fees.push(f); ids.push(f.id); }
             return {
               ...o,
-              transfers: o.transfers.map((t) => t.id === transferId ? { ...t, elevatorReservation: true, elevatorReservationTime: time, status: t.status === 'planned' || t.status === 'volunteerRequested' ? 'elevatorBooked' : t.status } : t),
-              messages: [...o.messages, orderMsg(`🛗 已预约医用电梯：${time}（平车优先梯位），志愿者与陪诊员在梯口交接。`, 'status')],
+              fees,
+              transfers: o.transfers.map((t) => t.id === transferId
+                ? { ...t, elevator, status: 'elevatorConfirmed' as const, feeCommitted: true, committedFeeIds: [...t.committedFeeIds, ...ids] }
+                : t),
+              messages: [
+                ...o.messages,
+                orderMsg(`🛗 ${source}已确认${target.campusId === 'east' ? '东院' : '总院'}医梯：${target.elevator.elevatorName}（${target.elevator.elevatorLocation}），预约时段「${input.slot}」，确认人 ${input.confirmedBy}。平车租借/转运费已生效入账，现可按该资源开始转运。`, 'auth'),
+                orderMsg(`【费用同步】平车租借 ${target.rentalFee} 元 + 转运服务 ${target.transportFee} 元，合计 ${transferFeeTotal(target)} 元已计入费用清单。`, 'fee'),
+              ],
+            };
+          }),
+        }));
+      },
+
+      // 取消确认/路线调整：医梯回退为待确认，红冲已入账费用，家属同步
+      releaseTransferElevator: (orderId, transferId, reason) => {
+        set((s) => ({
+          orders: s.orders.map((o) => {
+            if (o.id !== orderId) return o;
+            const target = o.transfers.find((t) => t.id === transferId);
+            if (!target || !target.elevator.required) return o;
+            const wasConfirmed = target.elevator.state === 'confirmed';
+            const source = target.campusId === 'east' ? '东院志愿服务台 8101' : '总院志愿服务台 8001';
+            const elevator = {
+              ...target.elevator,
+              state: 'needed' as const,
+              confirmedSlot: undefined,
+              confirmedSource: undefined,
+              confirmedBy: undefined,
+              confirmedAt: undefined,
+              releasedReason: reason,
+            };
+            // 红冲此前因确认而入账的费用（负数冲正）
+            const fees = [...o.fees];
+            const committedSet = new Set(target.committedFeeIds);
+            const reversalFees: FeeItem[] = [];
+            if (wasConfirmed) {
+              o.fees.filter((f) => committedSet.has(f.id)).forEach((f) => {
+                reversalFees.push({ id: uid('fee'), label: `红冲-${f.label}（医梯确认取消：${reason}）`, amount: -f.amount, at: nowISO(), category: 'other' });
+              });
+            }
+            const resetStatus: TransferStatus = target.status === 'arrived' || target.status === 'enroute'
+              ? target.status // 已在途/到达的不因资源取消倒改主状态
+              : 'elevatorPending';
+            return {
+              ...o,
+              fees: [...fees, ...reversalFees],
+              transfers: o.transfers.map((t) => t.id === transferId
+                ? { ...t, elevator, status: resetStatus, feeCommitted: false, committedFeeIds: [] }
+                : t),
+              messages: [
+                ...o.messages,
+                orderMsg(`🛗 ${source}医梯确认已取消/失效：${target.elevator.elevatorName}，原因「${reason}」。原预约时段、确认人与家属提示一并作废，恢复为待确认；请重新联系确认或调整路线，未重新确认前不可开始转运。`, 'auth'),
+                ...(reversalFees.length ? [orderMsg(`【费用红冲】已撤销该转运平车费用 ${Math.abs(reversalFees.reduce((x, f) => x + f.amount, 0))} 元，费用清单已回退；重新确认后再入账。`, 'fee')] : []),
+              ],
             };
           }),
         }));
@@ -1006,7 +1100,13 @@ export const useStore = create<AppState>()(
               ...o,
               stages,
               transfers: o.transfers.map((x) => x.id === transferId ? { ...x, congestionAction: 'reorder' as const, note: x.note + ' 【已调整检查顺序错峰】' } : x),
-              messages: [...o.messages, orderMsg('🔀 因转运路线拥堵，已与检查科室沟通把影像项目调整到 10:30 后错峰时段，并相应重排取号顺序；陪诊员先陪患者完成同楼层/近距离项目。', 'auth')],
+              messages: [
+                ...o.messages,
+                orderMsg('🔀 因转运路线拥堵，已与检查科室沟通把影像项目调整到 10:30 后错峰时段，并相应重排取号顺序；陪诊员先陪患者完成同楼层/近距离项目。', 'auth'),
+                ...(t.elevator.required && t.elevator.state === 'confirmed'
+                  ? [orderMsg(`🛗 检查时段错峰，原医梯预约「${t.elevator.confirmedSlot}」（${t.elevator.confirmedBy}）请向 ${t.campusId === 'east' ? '东院 8101' : '总院 8001'} 复核是否仍适用；若资源变更需取消原确认后重新确认。`, 'status')]
+                  : []),
+              ],
             };
           }),
         }));
@@ -1057,9 +1157,9 @@ export const useStore = create<AppState>()(
       resetAll: () => set({ orders: seedOrders(), initialized: true }),
     }),
     {
-      // v3：转运记录绑定院区、路线库缺失即拦截（旧缓存结构不兼容，更换 key 自动重新播种）
-      name: 'warm-sun-escort-v3',
-      version: 3,
+      // v4：卧位医梯需求与确认分离（旧结构不兼容，换 key 重新播种）
+      name: 'warm-sun-escort-v4',
+      version: 4,
       onRehydrateStorage: () => (state) => {
         if (state && state.orders.length === 0) state.orders = seedOrders();
         if (state) state.initialized = true;
