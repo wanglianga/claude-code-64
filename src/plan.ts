@@ -156,29 +156,47 @@ const STAGE_META: { key: StageState['key']; label: string }[] = [
 /** 根据科室/检查生成院内执行点与路线 */
 export function buildExecutionPlan(form: BookingForm) {
   const dept = DEPARTMENTS.find((d) => d.id === form.departmentId)!;
-  const selected = EXAMS.filter((e) => form.examIds.includes(e.id));
+  const campusId = dept.campusId;
+  const isEast = campusId === 'east';
+  // 同院区检查（已按科室所在院区过滤，避免东院订单引用总院采血/影像点）
+  const selected = EXAMS.filter((e) => form.examIds.includes(e.id) && e.campusId === campusId);
   const hasBlood = selected.some((e) => e.category === '抽血');
-  const hasImage = selected.some((e) => e.category === '影像');
+  const hasImage = selected.some((e) => e.category === '影像' || e.category === '内镜');
   const blood = selected.find((e) => e.category === '抽血');
-  const image = selected.find((e) => e.category === '影像');
+  const image = selected.find((e) => e.category === '影像' || e.category === '内镜');
 
-  const payWindow = `${dept.building} 1 层「人工收费 3 号窗」（东侧自助机人少时可自助缴费）`;
+  const payWindow = isEast
+    ? `${dept.building} 1 层「东院收费 2 号窗」（东侧自助机可自助缴费）`
+    : `${dept.building} 1 层「人工收费 3 号窗」（东侧自助机人少时可自助缴费）`;
   const bloodLocation = blood ? `${blood.building} ${blood.location}` : '本次无抽血项目';
   const imageLocation = image ? `${image.building} ${image.location}` : '本次无影像项目';
-  const pharmacyPoint = `${dept.building} 1 层 中心药房 2 号取药窗（先在窗口旁报到机扫码排队）`;
+  const pharmacyPoint = isEast
+    ? `${dept.building} 1 层 东院药房取药窗（先在窗口旁报到机扫码排队）`
+    : `${dept.building} 1 层 中心药房 2 号取药窗（先在窗口旁报到机扫码排队）`;
 
-  const routeSteps = [
-    `门诊正门 → 无障碍坡道（右侧）→ ${dept.building} 1 层大厅`,
-    `1 层大厅挂号收费区取号 → 乘 ${dept.building === '医技楼' ? '2 号直梯' : '中部 3 号直梯（低速医梯，停靠全楼层）'} 到 ${dept.floor}`,
-    `${dept.floor} ${dept.room} 门口报到机扫码签到，在候诊 2 区等待叫号`,
-    `开单后返回 1 层 ${payWindow} 缴费`,
-    hasBlood ? `经 2 号楼连廊（2 层空中连廊，遮雨）到门诊 1 号楼 ${blood?.location ?? ''} 采血` : '本次跳过采血环节',
-    hasImage ? `出 1 号楼沿地面指示线西行约 260 米到医技楼 ${image?.location ?? ''}（行动不便者走 2 层连廊转医梯直达 B1/1 层）` : '本次跳过影像环节',
-    `报告出具后返回 ${dept.room} 回诊（可先在公众号查看电子报告）`,
-    `回诊结束回 ${dept.building} 1 层中心药房取药后离院`,
-  ];
+  const routeSteps = isEast
+    ? [
+        `东院门急诊正门 → 无障碍坡道（右侧，宽 1.8m）→ ${dept.building} 1 层大厅`,
+        `1 层大厅挂号收费区取号 → 乘${dept.building}西侧无障碍直梯到 ${dept.floor}`,
+        `${dept.floor} ${dept.room} 门口报到机扫码签到，在候诊区等待叫号`,
+        `开单后返回 1 层 ${payWindow} 缴费`,
+        hasBlood ? `乘${dept.building}西侧无障碍直梯到 2 层，右转沿无障碍走廊到 ${blood?.location ?? '检验科'} 采血` : '本次跳过采血环节',
+        hasImage ? `检查单签注后走 1 层西侧无障碍通道，经遮雨连廊推行约 180 米到东院医技楼 ${image?.location ?? ''}（乘 1 号医用电梯，可提前拨 8101 预约接应）` : '本次跳过影像环节',
+        `报告出具后返回 ${dept.room} 回诊（可先在公众号查看电子报告）`,
+        `回诊结束回 ${dept.building} 1 层东院药房取药后离院`,
+      ]
+    : [
+        `门诊正门 → 无障碍坡道（右侧）→ ${dept.building} 1 层大厅`,
+        `1 层大厅挂号收费区取号 → 乘 ${dept.building === '医技楼' ? '2 号直梯' : '中部 3 号直梯（低速医梯，停靠全楼层）'} 到 ${dept.floor}`,
+        `${dept.floor} ${dept.room} 门口报到机扫码签到，在候诊 2 区等待叫号`,
+        `开单后返回 1 层 ${payWindow} 缴费`,
+        hasBlood ? `经 2 号楼连廊（2 层空中连廊，遮雨）到门诊 1 号楼 ${blood?.location ?? ''} 采血` : '本次跳过采血环节',
+        hasImage ? `出 1 号楼沿地面指示线西行约 260 米到医技楼 ${image?.location ?? ''}（行动不便者走 2 层连廊转医梯直达 B1/1 层）` : '本次跳过影像环节',
+        `报告出具后返回 ${dept.room} 回诊（可先在公众号查看电子报告）`,
+        `回诊结束回 ${dept.building} 1 层中心药房取药后离院`,
+      ];
 
-  return { dept, selected, hasBlood, hasImage, payWindow, bloodLocation, imageLocation, pharmacyPoint, routeSteps };
+  return { dept, campusId, selected, hasBlood, hasImage, payWindow, bloodLocation, imageLocation, pharmacyPoint, routeSteps };
 }
 
 /** 初始阶段状态（无对应项目的阶段标记 skipped） */

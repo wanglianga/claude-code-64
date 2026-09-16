@@ -212,9 +212,9 @@ function TransferCard({ order, t }: { order: EscortOrder; t: WheelchairTransfer 
 
       {seg.congestion === '拥堵' && t.congestionAction && (
         <div className="callout danger" style={{ marginTop: 10 }}>
-          路线拥堵处置：
+          路线拥堵处置（{t.campusId === 'east' ? '东院志愿服务台 8101' : '总院志愿服务台 8001'}）：
           <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
-            {!t.volunteerRequested && <button className="btn btn-sm btn-primary" disabled={t.status === 'arrived'} onClick={() => requestTransferVolunteer(order.id, t.id)}>📞 提前联系志愿服务台（8001）</button>}
+            {!t.volunteerRequested && <button className="btn btn-sm btn-primary" disabled={t.status === 'arrived'} onClick={() => requestTransferVolunteer(order.id, t.id)}>📞 提前联系{t.campusId === 'east' ? '东院志愿服务台（8101）' : '总院志愿服务台（8001）'}</button>}
             {t.congestionAction === 'volunteer' && <button className="btn btn-sm" disabled={t.status === 'arrived'} onClick={() => reorderForTransferCongestion(order.id, t.id)}>🔀 改为调整检查顺序错峰</button>}
           </div>
         </div>

@@ -965,10 +965,15 @@ export const useStore = create<AppState>()(
         set((s) => ({
           orders: s.orders.map((o) => {
             if (o.id !== orderId) return o;
+            const target = o.transfers.find((t) => t.id === transferId);
+            if (!target) return o;
+            // 志愿服务台必须与转运记录同一院区，杜绝东院订单误报总院 8001
+            const phone = target.campusId === 'east' ? '8101（东院志愿服务台）' : '8001（总院志愿服务台）';
+            const building = target.campusId === 'east' ? '东院医技楼' : '影像楼';
             return {
               ...o,
               transfers: o.transfers.map((t) => t.id === transferId ? { ...t, volunteerRequested: true, status: t.status === 'planned' ? 'volunteerRequested' : t.status } : t),
-              messages: [...o.messages, orderMsg('📞 已联系志愿服务台（8001）：请求志愿者在影像楼端接应并协助医梯，预计 5 分钟到位；已同步家属。', 'auth')],
+              messages: [...o.messages, orderMsg(`📞 已联系${phone}：请求志愿者在${building}端接应并协助医梯，预计 5 分钟到位；已同步家属。`, 'auth')],
             };
           }),
         }));
